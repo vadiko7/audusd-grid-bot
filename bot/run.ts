@@ -16,7 +16,11 @@ import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, sendTx } from
 import { createAuthToken, signCancelAll, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
-  const candidates = [path.resolve(".env"), path.resolve("bot/.env")];
+  const candidates = [
+    path.resolve(".env"),
+    path.resolve("bot/.env"),
+    path.join(path.dirname(new URL(import.meta.url).pathname), "..", ".env"),
+  ];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
     for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -32,11 +36,12 @@ function loadDotEnv() {
       ) {
         v = v.slice(1, -1);
       }
-      if (process.env[k] == null) process.env[k] = v;
+      if (process.env[k] == null || process.env[k] === "") process.env[k] = v;
     }
     log(`loaded ${file}`);
-    return;
+    return file;
   }
+  return null;
 }
 
 function reqEnv(name: string): string {
@@ -49,7 +54,7 @@ function log(message: string) {
   process.stdout.write(`${new Date().toISOString()} ${message}\n`);
 }
 
-loadDotEnv();
+const envFile = loadDotEnv();
 
 const creds: LighterCreds = {
   accountIndex: Number(reqEnv("LIGHTER_ACCOUNT_INDEX")),
@@ -188,32 +193,60 @@ function status(): PublicSnapshot & { error: string | null; lastTx: string | nul
   };
 }
 
-function htmlPage(s: ReturnType<typeof status>): string {
-  const logs = [...s.logs].slice(-40).reverse();
-  const orders = s.orders
-    .map((o) => `<li>${o.side.toUpperCase()} ${o.price.toFixed(5)} × ${o.qty.toFixed(1)}</li>`)
-    .join("") || "<li>none</li>";
+function htmlPage(): string {
   return `<!doctype html>
-<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="2">
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AUDUSD grid</title>
 <style>
 body{font:14px/1.45 ui-sans-serif,system-ui;background:#08090b;color:#ecece8;margin:24px}
 .muted{color:#8b8e93} .ok{color:#3f9a78} .warn{color:#c4a35a} .bad{color:#c45c4a}
 ul{padding-left:1.1rem} code{font-family:ui-monospace,Menlo,monospace}
+button{background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.35rem .7rem;margin-right:.4rem;cursor:pointer}
 </style></head><body>
-<h1>AUDUSD short grid <span class="muted">acct ${s.accountIndex}</span></h1>
-<p>armed <strong class="${s.armed ? "ok" : "warn"}">${s.armed}</strong>
- · source ${s.accountSource}
- · mark <code>${s.mark.toFixed(5)}</code>
- · equity <code>$${s.equity.toFixed(2)}</code>
- · pos <code>${s.position.size.toFixed(1)}</code>
- · remaining <code>$${s.remaining.toFixed(0)}</code></p>
-<p class="muted">POST /arm · /disarm · /flatten &nbsp; GET /status</p>
-${s.error ? `<p class="bad">${s.error}</p>` : ""}
-${s.lastTx ? `<p class="muted">last tx ${s.lastTx}</p>` : ""}
-<h2>Working</h2><ul>${orders}</ul>
-<h2>Blotter</h2>
-<ul>${logs.map((l) => `<li><code>${new Date(l.ts).toISOString().slice(11, 19)}</code> ${l.level} ${l.message}</li>`).join("")}</ul>
+<h1>AUDUSD short grid <span id="acct" class="muted"></span></h1>
+<p id="line">loading…</p>
+<p id="err" class="bad"></p>
+<p id="tx" class="muted"></p>
+<p>
+  <button type="button" data-cmd="/arm">Arm</button>
+  <button type="button" data-cmd="/disarm">Disarm</button>
+  <button type="button" data-cmd="/flatten">Flatten</button>
+</p>
+<h2>Working</h2><ul id="orders"><li>none</li></ul>
+<h2>Blotter</h2><ul id="logs"></ul>
+<script>
+function esc(s){
+  return String(s).replace(/[&<>]/g, function(c){
+    if (c === "&") return "&#38;";
+    if (c === "<") return "&#60;";
+    return "&#62;";
+  });
+}
+async function refresh(){
+  const s = await fetch("/status",{cache:"no-store"}).then(r=>r.json());
+  document.getElementById("acct").textContent = "acct "+s.accountIndex;
+  document.getElementById("line").innerHTML =
+    "armed <strong class='"+(s.armed?"ok":"warn")+"'>"+s.armed+"</strong>"
+    +" · source "+esc(s.accountSource)
+    +" · mark <code>"+Number(s.mark).toFixed(5)+"</code>"
+    +" · equity <code>$"+Number(s.equity).toFixed(2)+"</code>"
+    +" · pos <code>"+Number(s.position.size).toFixed(1)+"</code>"
+    +" · remaining <code>$"+Number(s.remaining).toFixed(0)+"</code>";
+  document.getElementById("err").textContent = s.error || "";
+  document.getElementById("tx").textContent = s.lastTx ? "last tx "+s.lastTx : "";
+  const orders = (s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(5)+" × "+Number(o.qty).toFixed(1)+"</li>");
+  document.getElementById("orders").innerHTML = orders.join("") || "<li>none</li>";
+  const logs = [...(s.logs||[])].slice(-40).reverse()
+    .map(l=>"<li><code>"+new Date(l.ts).toISOString().slice(11,19)+"</code> "+esc(l.level)+" "+esc(l.message)+"</li>");
+  document.getElementById("logs").innerHTML = logs.join("") || "<li>empty</li>";
+}
+document.querySelectorAll("button[data-cmd]").forEach(b=>{
+  b.onclick = async ()=>{ await fetch(b.dataset.cmd,{method:"POST"}); refresh(); };
+});
+refresh();
+setInterval(refresh, 2000);
+</script>
 </body></html>`;
 }
 
@@ -243,7 +276,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/" && (req.method === "GET" || req.method === "HEAD")) {
-    const body = htmlPage(status());
+    const body = htmlPage();
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     res.end(body);
     return;
@@ -253,7 +286,7 @@ const server = http.createServer((req, res) => {
 });
 
 async function main() {
-  log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM}`);
+  log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`);
   await refreshLive();
   mark = await fetchMark();
   hourly = await fetchCandles("1h", 30);

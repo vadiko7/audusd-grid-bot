@@ -1,0 +1,21 @@
+[Unit]
+Description=AUDUSD short geometric grid bot (Lighter)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/audusd-grid-bot
+EnvironmentFile=/home/ubuntu/audusd-grid-bot/.env
+ExecStart=/usr/bin/node --experimental-strip-types bot/run.ts
+Restart=always
+RestartSec=4
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

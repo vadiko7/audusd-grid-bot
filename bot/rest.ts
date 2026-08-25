@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import {
   LIGHTER_REST,
   MARKET_ID,
@@ -5,6 +6,8 @@ import {
   SIZE_DECIMALS,
 } from "../src/lib/grid/constants.ts";
 import type { Candle, GridOrder, LiveAccount, Side } from "../src/lib/grid/types.ts";
+
+dns.setDefaultResultOrder("ipv4first");
 
 type RawPosition = {
   market_id: number;
@@ -42,6 +45,10 @@ type RawOrder = {
   created_at?: number;
 };
 
+type BookRow = { market_id?: number; mark_price?: string | number };
+
+const UA = "audusd-grid-bot/1.0";
+
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -49,7 +56,14 @@ function num(v: unknown): number {
 
 async function lighterGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(`${LIGHTER_REST}${path}`, {
-    headers: { accept: "application/json", ...headers },
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      "user-agent": UA,
+      ...headers,
+    },
+    cache: "no-store",
+    redirect: "follow",
     signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) throw new Error(`Lighter ${res.status} ${path}`);
@@ -131,13 +145,43 @@ export async function fetchActiveOrders(accountIndex: number, auth: string): Pro
   return mapOrders(json.orders ?? []);
 }
 
+function markFromBooks(json: {
+  order_book_details?: BookRow[];
+  order_books?: BookRow[];
+}): number {
+  const rows = json.order_book_details ?? json.order_books ?? [];
+  const row = rows.find((r) => Number(r.market_id) === MARKET_ID) ?? rows[0];
+  return Number(row?.mark_price);
+}
+
 export async function fetchMark(): Promise<number> {
-  const json = await lighterGet<{ order_book_details?: Array<{ mark_price: string }> }>(
+  const paths = [
+    `/api/v1/orderBooks?market_id=${MARKET_ID}`,
     `/api/v1/orderBookDetails?market_id=${MARKET_ID}`,
-  );
-  const mark = Number(json.order_book_details?.[0]?.mark_price);
-  if (!(mark > 0)) throw new Error("AUDUSD mark missing");
-  return mark;
+    `/api/v1/orderBooks`,
+    `/api/v1/orderBookDetails`,
+  ];
+  let last = "AUDUSD mark missing";
+  for (const path of paths) {
+    try {
+      const json = await lighterGet<{ order_book_details?: BookRow[]; order_books?: BookRow[] }>(path);
+      const mark = markFromBooks(json);
+      if (mark > 0) return mark;
+      last = `${path} empty mark`;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+  }
+  try {
+    const json = await lighterGet<{ trades?: Array<{ price?: string }> }>(
+      `/api/v1/recentTrades?market_id=${MARKET_ID}&limit=1`,
+    );
+    const mark = Number(json.trades?.[0]?.price);
+    if (mark > 0) return mark;
+  } catch (err) {
+    last = err instanceof Error ? err.message : String(err);
+  }
+  throw new Error(last);
 }
 
 export async function fetchCandles(resolution: "1m" | "1h", countBack: number): Promise<Candle[]> {
@@ -166,7 +210,11 @@ export async function sendTx(tx: {
   body.set("price_protection", "true");
   const res = await fetch(`${LIGHTER_REST}/api/v1/sendTx`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+      "user-agent": UA,
+    },
     body,
     signal: AbortSignal.timeout(15_000),
   });

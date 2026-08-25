@@ -87,6 +87,22 @@ async function curlCall(
   };
 }
 
+let coolUntil = 0;
+let coolMs = 15_000;
+
+export function restReady(): boolean {
+  return Date.now() >= coolUntil;
+}
+
+function tripCool(status: number, hint: string) {
+  if (status !== 405 && !/Human Verification/i.test(hint)) return;
+  coolUntil = Date.now() + coolMs;
+  process.stdout.write(
+    `${new Date().toISOString()} Lighter REST blocked ${status} — cooldown ${Math.round(coolMs / 1000)}s (WS mark still used)\n`,
+  );
+  coolMs = Math.min(coolMs * 2, 180_000);
+}
+
 async function request(
   method: string,
   path: string,
@@ -94,9 +110,16 @@ async function request(
   body?: string,
   timeoutMs = 8_000,
 ): Promise<HttpResult> {
+  if (Date.now() < coolUntil) {
+    throw new Error(`Lighter REST cooldown ${Math.ceil((coolUntil - Date.now()) / 1000)}s`);
+  }
   const res = await curlCall(method, `${LIGHTER_REST}${path}`, headers ?? {}, body, timeoutMs);
-  if (res.status >= 200 && res.status < 300) return res;
+  if (res.status >= 200 && res.status < 300) {
+    coolMs = 15_000;
+    return res;
+  }
   const hint = res.body.replace(/\s+/g, " ").slice(0, 120);
+  tripCool(res.status, hint);
   throw new Error(`Lighter curl ${res.status} ${path} ${hint}`);
 }
 
@@ -190,8 +213,10 @@ function markFromBooks(json: {
 }
 
 let lastWsMark = 0;
+let lastWsAt = 0;
 let markSocket: WebSocket | null = null;
 let wsRetry: ReturnType<typeof setTimeout> | null = null;
+let wsPing: ReturnType<typeof setInterval> | null = null;
 
 function startMarkSocket() {
   if (markSocket && (markSocket.readyState === WebSocket.OPEN || markSocket.readyState === WebSocket.CONNECTING)) {
@@ -201,6 +226,10 @@ function startMarkSocket() {
   markSocket = sock;
   sock.addEventListener("open", () => {
     sock.send(JSON.stringify({ type: "subscribe", channel: `market_stats/${MARKET_ID}` }));
+    if (wsPing) clearInterval(wsPing);
+    wsPing = setInterval(() => {
+      if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "ping" }));
+    }, 45_000);
   });
   sock.addEventListener("message", (ev) => {
     try {
@@ -212,13 +241,20 @@ function startMarkSocket() {
       const stats = msg.market_stats ?? msg;
       const id = Number(stats.market_id);
       const mark = Number(stats.mark_price);
-      if (mark > 0 && (id === MARKET_ID || !Number.isFinite(id))) lastWsMark = mark;
+      if (mark > 0 && (id === MARKET_ID || !Number.isFinite(id))) {
+        lastWsMark = mark;
+        lastWsAt = Date.now();
+      }
     } catch {
       /* ignore malformed frames */
     }
   });
   sock.addEventListener("close", () => {
     if (markSocket === sock) markSocket = null;
+    if (wsPing) {
+      clearInterval(wsPing);
+      wsPing = null;
+    }
     if (wsRetry) clearTimeout(wsRetry);
     wsRetry = setTimeout(startMarkSocket, 2_000);
   });
@@ -231,36 +267,31 @@ function startMarkSocket() {
   });
 }
 
+export function peekMark(): number {
+  return lastWsMark > 0 ? lastWsMark : 0;
+}
+
 export async function fetchMark(): Promise<number> {
   startMarkSocket();
-  const paths = [
-    `/api/v1/orderBooks?market_id=${MARKET_ID}`,
-    `/api/v1/orderBookDetails?market_id=${MARKET_ID}`,
-    `/api/v1/orderBooks`,
-    `/api/v1/recentTrades?market_id=${MARKET_ID}&limit=1`,
-  ];
-  let last = "AUDUSD mark missing";
-  for (const path of paths) {
+  if (peekMark() > 0 && Date.now() - lastWsAt < 12_000) return peekMark();
+  if (restReady() && peekMark() <= 0) {
     try {
-      const json = await lighterGet<{
-        order_book_details?: BookRow[];
-        order_books?: BookRow[];
-        trades?: Array<{ price?: string }>;
-      }>(path);
-      const mark = markFromBooks(json) || Number(json.trades?.[0]?.price);
+      const json = await lighterGet<{ order_book_details?: BookRow[] }>(
+        `/api/v1/orderBookDetails?market_id=${MARKET_ID}`,
+      );
+      const mark = markFromBooks(json);
       if (mark > 0) return mark;
-      last = `${path} empty mark`;
-    } catch (err) {
-      last = err instanceof Error ? err.message : String(err);
+    } catch {
+      /* wait for WS */
     }
   }
-  if (lastWsMark > 0) return lastWsMark;
-  const until = Date.now() + 3_000;
+  const until = Date.now() + 4_000;
   while (Date.now() < until) {
-    await new Promise((r) => setTimeout(r, 200));
-    if (lastWsMark > 0) return lastWsMark;
+    await new Promise((r) => setTimeout(r, 150));
+    if (peekMark() > 0) return peekMark();
   }
-  throw new Error(last);
+  if (lastWsMark > 0) return lastWsMark;
+  throw new Error("AUDUSD mark missing (waiting for public WS market_stats)");
 }
 
 export async function fetchCandles(resolution: "1m" | "1h", countBack: number): Promise<Candle[]> {

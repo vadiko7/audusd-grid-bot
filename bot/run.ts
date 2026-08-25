@@ -13,7 +13,7 @@ import {
   type PublicSnapshot,
 } from "../src/lib/grid/engine.ts";
 import type { Candle, EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
-import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, sendTx } from "./rest.ts";
+import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, signCancelAll, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
@@ -190,20 +190,22 @@ async function tick() {
   const now = Date.now();
   try {
     mark = await fetchMark();
-    if (now - lastCandles > 15_000) {
+    if (restReady() && now - lastCandles > 60_000) {
       lastCandles = now;
       const [h, m] = await Promise.all([fetchCandles("1h", 30), fetchCandles("1m", 5)]);
       hourly = h;
       minute = m.at(-1) ?? null;
     }
-    if (now - lastAccount > 900) {
+    if (restReady() && now - lastAccount > 15_000) {
       lastAccount = now;
       await refreshLive();
     }
-    lastError = null;
+    if (restReady()) lastError = null;
   } catch (err) {
-    lastError = err instanceof Error ? err.message : String(err);
-    log(`feed error ${lastError}`);
+    const message = err instanceof Error ? err.message : String(err);
+    lastError = message;
+    const quiet = message.includes("cooldown");
+    if (!quiet) log(`feed error ${message}`);
   }
 
   if (mark > 0) {
@@ -216,7 +218,7 @@ async function tick() {
     });
     drainAndSend();
   }
-  timer = setTimeout(tick, engine.cycleMs);
+  timer = setTimeout(tick, Math.max(engine.cycleMs, 800));
 }
 
 function status(): PublicSnapshot & { error: string | null; lastTx: string | null; accountIndex: number } {

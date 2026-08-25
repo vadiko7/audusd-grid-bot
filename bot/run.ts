@@ -13,8 +13,8 @@ import {
   type PublicSnapshot,
 } from "../src/lib/grid/engine.ts";
 import type { Candle, EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
-import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, restReady, sendTx } from "./rest.ts";
-import { createAuthToken, signCancelAll, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
+import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
+import { createAuthToken, dropSigner, signCancelAll, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
   const candidates = [
@@ -141,6 +141,8 @@ async function refreshLive() {
 
 async function executeActions(actions: EngineAction[]) {
   if (actions.length === 0) return;
+  const seenCancel = new Set<string>();
+  const hasCancelAll = actions.some((a) => a.type === "cancel_all");
   for (const action of actions) {
     if (action.type === "place") {
       const signed = await signCreateLimit(creds, {
@@ -155,6 +157,9 @@ async function executeActions(actions: EngineAction[]) {
       lastTx = res.hash || lastTx;
       log(`tx place ${action.side} ${action.price.toFixed(5)} × ${action.qty.toFixed(1)} ${res.hash ?? ""}`);
     } else if (action.type === "cancel") {
+      if (hasCancelAll) continue;
+      if (seenCancel.has(action.orderId)) continue;
+      seenCancel.add(action.orderId);
       const idx = Number(action.orderId);
       if (!Number.isFinite(idx)) continue;
       const signed = await signCancelOrder(creds, { marketIndex: MARKET_ID, orderIndex: idx });
@@ -171,14 +176,16 @@ async function executeActions(actions: EngineAction[]) {
 }
 
 function drainAndSend() {
+  if (busy) return;
   const actions = engine.actions.slice();
   engine.actions = [];
-  if (!actions.length || busy) return;
+  if (!actions.length) return;
   busy = true;
   executeActions(actions)
     .catch((err) => {
       lastError = err instanceof Error ? err.message : String(err);
       log(`tx error ${lastError}`);
+      if (/invalid nonce/i.test(lastError)) dropSigner(creds);
     })
     .finally(() => {
       busy = false;
@@ -375,8 +382,9 @@ async function main() {
       return;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      log(`startup retry ${lastError}`);
-      await new Promise((r) => setTimeout(r, 4_000));
+      const wait = Math.max(4_000, restBlockedFor() + 200);
+      if (!lastError.includes("cooldown")) log(`startup retry ${lastError}`);
+      await new Promise((r) => setTimeout(r, wait));
     }
   }
 }

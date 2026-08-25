@@ -94,6 +94,10 @@ export function restReady(): boolean {
   return Date.now() >= coolUntil;
 }
 
+export function restBlockedFor(): number {
+  return Math.max(0, coolUntil - Date.now());
+}
+
 function tripCool(status: number, hint: string) {
   if (status !== 405 && !/Human Verification/i.test(hint)) return;
   coolUntil = Date.now() + coolMs;

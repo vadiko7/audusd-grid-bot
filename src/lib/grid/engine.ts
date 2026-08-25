@@ -197,17 +197,14 @@ function applyFill(state: EngineState, fill: Fill) {
 
 function ingestLive(state: EngineState, live: LiveAccount) {
   const prev = state.orders;
-  const nextIds = new Set(live.orders.map((o) => o.id));
   const cancelled = new Set(state.cancelledIds);
-  const stillCancelled: string[] = [];
+  const liveOpen = live.orders.filter((o) => !cancelled.has(o.id));
+  const nextIds = new Set(liveOpen.map((o) => o.id));
 
   for (const order of prev) {
     if (order.id.startsWith("pending:")) continue;
-    if (nextIds.has(order.id)) {
-      if (cancelled.has(order.id)) stillCancelled.push(order.id);
-      continue;
-    }
     if (cancelled.has(order.id)) continue;
+    if (nextIds.has(order.id)) continue;
     const fill: Fill = {
       orderId: order.id,
       side: order.side,
@@ -226,9 +223,9 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     });
   }
 
-  const pending = prev.filter((o) => o.id.startsWith("pending:"));
+  const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id));
   const stillPending = pending.filter(
-    (p) => !live.orders.some((o) => o.side === p.side && Math.abs(o.price - p.price) < 1e-8),
+    (p) => !liveOpen.some((o) => o.side === p.side && Math.abs(o.price - p.price) < 1e-8),
   );
 
   const wasNone = state.accountSource !== "live";
@@ -237,8 +234,8 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.position = { ...live.position };
   state.realizedPnl = live.realizedPnl;
   state.unrealizedPnl = live.unrealizedPnl;
-  state.orders = [...live.orders, ...stillPending];
-  state.cancelledIds = stillCancelled;
+  state.orders = [...liveOpen, ...stillPending];
+  state.cancelledIds = [...cancelled].filter((id) => live.orders.some((o) => o.id === id) || id.startsWith("pending:"));
   if (wasNone) {
     pushLog(state, "info", `live account ${live.accountIndex} · equity $${live.equity.toFixed(2)}`);
   }
@@ -357,7 +354,9 @@ function cleanInvalid(state: EngineState) {
       (order.side === "sell" && inProximity(order.price, levels.sell, prox)) ||
       (order.side === "buy" && inProximity(order.price, levels.buy, prox));
     if (belongs) keep.push(order);
-    else {
+    else if (state.cancelledIds.includes(order.id)) {
+      /* already cancelling — do not emit another tx */
+    } else {
       state.cancelledIds.push(order.id);
       emit(state, {
         type: "cancel",

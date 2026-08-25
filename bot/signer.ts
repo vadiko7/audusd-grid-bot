@@ -70,6 +70,11 @@ async function captureSign(client: SignerClient, run: () => Promise<unknown>): P
   }
 }
 
+export function dropSigner(creds: LighterCreds) {
+  const key = `${creds.accountIndex}:${creds.apiKeyIndex}:${creds.privateKey.slice(0, 8)}`;
+  cache.delete(key);
+}
+
 export async function createAuthToken(creds: LighterCreds): Promise<string> {
   const client = await getClient(creds);
   const token = await client.createAuthTokenWithExpiry(60 * 60);

@@ -352,21 +352,31 @@ const server = http.createServer((req, res) => {
 
 async function main() {
   log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM} notional=$${startNotional} env=${envFile ?? "process-env"}`);
-  await refreshLive();
-  mark = await fetchMark();
-  hourly = await fetchCandles("1h", 30);
-  const m = await fetchCandles("1m", 5);
-  minute = m.at(-1) ?? null;
-  lastAccount = Date.now();
-  lastCandles = Date.now();
-  step(engine, { now: Date.now(), mark, hourlyCandles: hourly, minuteCandle: minute, live });
-  log(`live equity $${engine.accountEquity?.toFixed(2)} pos ${engine.position.size.toFixed(1)} mark ${mark.toFixed(5)}`);
-  if (WANT_ARM) {
-    setArmed(engine, true);
-    drainAndSend();
-  }
   server.listen(PORT, HOST, () => log(`status http://${HOST}:${PORT}/`));
-  timer = setTimeout(tick, 80);
+  for (;;) {
+    if (stopped) return;
+    try {
+      await refreshLive();
+      mark = await fetchMark();
+      hourly = await fetchCandles("1h", 30);
+      const m = await fetchCandles("1m", 5);
+      minute = m.at(-1) ?? null;
+      lastAccount = Date.now();
+      lastCandles = Date.now();
+      step(engine, { now: Date.now(), mark, hourlyCandles: hourly, minuteCandle: minute, live });
+      log(`live equity $${engine.accountEquity?.toFixed(2)} pos ${engine.position.size.toFixed(1)} mark ${mark.toFixed(5)}`);
+      if (WANT_ARM) {
+        setArmed(engine, true);
+        drainAndSend();
+      }
+      timer = setTimeout(tick, 80);
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      log(`startup retry ${lastError}`);
+      await new Promise((r) => setTimeout(r, 4_000));
+    }
+  }
 }
 
 function shutdown() {

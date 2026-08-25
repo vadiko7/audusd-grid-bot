@@ -1,0 +1,11 @@
+{
+  "name": "audusd-grid-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types bot/run.ts"
+  },
+  "dependencies": {
+    "@specialjp/lighter-sdk": "^1.0.14"
+  }
+}

@@ -129,9 +129,14 @@ export function bias(state: EngineState): "short" | "long" | "flat" {
   return state.position.size < 0 ? "short" : "long";
 }
 
-function anchorPrice(state: EngineState): number {
+function fillAnchor(state: EngineState): number | null {
   if (state.lastFillPrice && state.lastFillPrice > 0) return state.lastFillPrice;
-  return state.mark;
+  if (!isFlat(state) && state.position.entry > 0) return state.position.entry;
+  return null;
+}
+
+function anchorPrice(state: EngineState): number {
+  return fillAnchor(state) ?? state.mark;
 }
 
 export function validLevels(state: EngineState): { sell: number; buy: number } {
@@ -346,6 +351,7 @@ function cancelAll(state: EngineState, reason: string) {
 }
 
 function cleanInvalid(state: EngineState) {
+  if (!fillAnchor(state)) return;
   const levels = validLevels(state);
   const prox = proximityPct(state.spacingPct);
   const keep: GridOrder[] = [];
@@ -383,6 +389,7 @@ function recenter(state: EngineState, reason: string) {
 
 function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
+  if (!fillAnchor(state)) return;
   const levels = validLevels(state);
   if (!hasNear(state, levels.sell)) placeLimit(state, "sell", levels.sell, why);
   if (!isFlat(state) && !hasNear(state, levels.buy)) placeLimit(state, "buy", levels.buy, why);
@@ -501,8 +508,7 @@ export function setArmed(state: EngineState, armed: boolean): EngineState {
   if (state.config.armed === armed) return state;
   state.config = { ...state.config, armed };
   if (armed) {
-    pushLog(state, "info", "armed — short geometric grid live");
-    maintainPair(state, "arm ±1");
+    pushLog(state, "info", "armed — ±1 only after a fill (no seed from mark)");
   } else {
     cancelAll(state, "disarmed");
     pushLog(state, "info", "disarmed — working limits cancelled");
@@ -567,14 +573,14 @@ export function resetSession(state: EngineState): EngineState {
 
 function runArmedCycle(state: EngineState) {
   const currentBias = bias(state);
-  const anchor = anchorPrice(state);
-  if (currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor)) {
+  const anchor = fillAnchor(state);
+  if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor)) {
     recenter(state, `adverse ≥ ${ADVERSE_STEPS} steps against short`);
     maintainPair(state, "re-place ±1 after adverse");
-  } else if (currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor)) {
+  } else if (anchor && currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor)) {
     recenter(state, `adverse ≥ ${ADVERSE_STEPS} steps against long`);
     maintainPair(state, "re-place ±1 after adverse");
-  } else {
+  } else if (anchor) {
     cleanInvalid(state);
   }
 

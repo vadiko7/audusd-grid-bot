@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process";
-import dns from "node:dns";
-import https from "node:https";
 import { promisify } from "node:util";
 import {
   LIGHTER_REST,
@@ -11,10 +9,7 @@ import {
 } from "../src/lib/grid/constants.ts";
 import type { Candle, GridOrder, LiveAccount, Side } from "../src/lib/grid/types.ts";
 
-dns.setDefaultResultOrder("ipv4first");
-
 const execFileAsync = promisify(execFile);
-const UA = "curl/8.5.0";
 
 type RawPosition = {
   market_id: number;
@@ -60,77 +55,25 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function httpsCall(
-  method: string,
-  urlStr: string,
-  headers: Record<string, string>,
-  body?: string,
-  timeoutMs = 8_000,
-  pinIp?: string,
-): Promise<HttpResult> {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const req = https.request(
-      {
-        hostname: pinIp || u.hostname,
-        port: 443,
-        path: `${u.pathname}${u.search}`,
-        method,
-        servername: u.hostname,
-        family: 4,
-        headers: {
-          host: u.hostname,
-          accept: "application/json",
-          "user-agent": UA,
-          connection: "close",
-          ...headers,
-          ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}),
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
-        );
-      },
-    );
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error("timeout"));
-    });
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
 async function curlCall(
   method: string,
   urlStr: string,
-  headers: Record<string, string>,
+  headers: Record<string, string> = {},
   body?: string,
   timeoutMs = 8_000,
-  pinIp?: string,
 ): Promise<HttpResult> {
-  const u = new URL(urlStr);
   const args = [
     "-sS",
-    "-4",
-    "--http1.1",
-    "-A",
-    UA,
     "-H",
     "accept: application/json",
     "-w",
     "\n__STATUS__%{http_code}",
     "--max-time",
-    String(Math.ceil(timeoutMs / 1000)),
+    String(Math.max(3, Math.ceil(timeoutMs / 1000))),
   ];
-  if (method !== "GET") args.push("-X", method);
-  if (pinIp) args.push("--resolve", `${u.hostname}:443:${pinIp}`);
+  if (method !== "GET" && method !== "HEAD") args.push("-X", method);
   for (const [k, v] of Object.entries(headers)) {
-    const key = k.toLowerCase();
-    if (key === "accept" || key === "user-agent" || key === "host") continue;
+    if (k.toLowerCase() === "accept") continue;
     args.push("-H", `${k}: ${v}`);
   }
   if (body) args.push("--data-binary", body);
@@ -144,18 +87,6 @@ async function curlCall(
   };
 }
 
-const PIN_IPS = (process.env.LIGHTER_PIN_IPS || "108.138.64.75,108.138.64.25,108.138.64.52")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-type Route = { t: "https" | "curl"; ip: string | null };
-let route: Route | null = null;
-
-function snippet(body: string): string {
-  return body.replace(/\s+/g, " ").slice(0, 160);
-}
-
 async function request(
   method: string,
   path: string,
@@ -163,39 +94,10 @@ async function request(
   body?: string,
   timeoutMs = 8_000,
 ): Promise<HttpResult> {
-  const url = `${LIGHTER_REST}${path}`;
-  const hdrs = headers ?? {};
-  const ips: Array<string | null> = [null, ...PIN_IPS];
-  const routes: Route[] = [];
-  if (route) routes.push(route);
-  for (const t of ["https", "curl"] as const) {
-    for (const ip of ips) {
-      const cand = { t, ip };
-      if (!routes.some((r) => r.t === cand.t && r.ip === cand.ip)) routes.push(cand);
-    }
-  }
-  let last = "no transport";
-  for (const cand of routes) {
-    try {
-      const res =
-        cand.t === "https"
-          ? await httpsCall(method, url, hdrs, body, timeoutMs, cand.ip ?? undefined)
-          : await curlCall(method, url, hdrs, body, timeoutMs, cand.ip ?? undefined);
-      if (res.status >= 200 && res.status < 300) {
-        if (!route || route.t !== cand.t || route.ip !== cand.ip) {
-          route = cand;
-          process.stdout.write(
-            `${new Date().toISOString()} lighter via ${cand.t}${cand.ip ? `@${cand.ip}` : ""} ${method} ${path.split("?")[0]}\n`,
-          );
-        }
-        return res;
-      }
-      last = `${cand.t}${cand.ip ? `@${cand.ip}` : ""} ${res.status} ${path} ${snippet(res.body)}`;
-    } catch (err) {
-      last = `${cand.t}${cand.ip ? `@${cand.ip}` : ""} ${err instanceof Error ? err.message : String(err)} ${path}`;
-    }
-  }
-  throw new Error(`Lighter ${last}`);
+  const res = await curlCall(method, `${LIGHTER_REST}${path}`, headers ?? {}, body, timeoutMs);
+  if (res.status >= 200 && res.status < 300) return res;
+  const hint = res.body.replace(/\s+/g, " ").slice(0, 120);
+  throw new Error(`Lighter curl ${res.status} ${path} ${hint}`);
 }
 
 async function lighterGet<T>(path: string, headers?: Record<string, string>): Promise<T> {

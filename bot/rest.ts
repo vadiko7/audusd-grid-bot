@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
 import dns from "node:dns";
+import https from "node:https";
+import { promisify } from "node:util";
 import {
   LIGHTER_REST,
+  LIGHTER_WS,
   MARKET_ID,
   PRICE_DECIMALS,
   SIZE_DECIMALS,
@@ -8,6 +12,9 @@ import {
 import type { Candle, GridOrder, LiveAccount, Side } from "../src/lib/grid/types.ts";
 
 dns.setDefaultResultOrder("ipv4first");
+
+const execFileAsync = promisify(execFile);
+const UA = "curl/8.5.0";
 
 type RawPosition = {
   market_id: number;
@@ -46,28 +53,124 @@ type RawOrder = {
 };
 
 type BookRow = { market_id?: number; mark_price?: string | number };
-
-const UA = "audusd-grid-bot/1.0";
+type HttpResult = { status: number; body: string };
 
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
-async function lighterGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch(`${LIGHTER_REST}${path}`, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      "user-agent": UA,
-      ...headers,
-    },
-    cache: "no-store",
-    redirect: "follow",
-    signal: AbortSignal.timeout(8_000),
+function httpsCall(
+  method: string,
+  urlStr: string,
+  headers: Record<string, string>,
+  body?: string,
+  timeoutMs = 8_000,
+): Promise<HttpResult> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const req = https.request(
+      {
+        hostname: u.hostname,
+        port: 443,
+        path: `${u.pathname}${u.search}`,
+        method,
+        headers: {
+          accept: "application/json",
+          "user-agent": UA,
+          connection: "close",
+          ...headers,
+          ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+      },
+    );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error("timeout"));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
   });
-  if (!res.ok) throw new Error(`Lighter ${res.status} ${path}`);
-  return (await res.json()) as T;
+}
+
+async function curlCall(
+  method: string,
+  urlStr: string,
+  headers: Record<string, string>,
+  body?: string,
+  timeoutMs = 8_000,
+): Promise<HttpResult> {
+  const args = [
+    "-sS",
+    "--http1.1",
+    "-A",
+    UA,
+    "-X",
+    method,
+    "-H",
+    "accept: application/json",
+    "-w",
+    "\n__STATUS__%{http_code}",
+    "--max-time",
+    String(Math.ceil(timeoutMs / 1000)),
+  ];
+  for (const [k, v] of Object.entries(headers)) {
+    const key = k.toLowerCase();
+    if (key === "accept" || key === "user-agent") continue;
+    args.push("-H", `${k}: ${v}`);
+  }
+  if (body) args.push("--data-binary", body);
+  args.push(urlStr);
+  const { stdout } = await execFileAsync("curl", args, { maxBuffer: 12_000_000 });
+  const idx = stdout.lastIndexOf("\n__STATUS__");
+  if (idx < 0) return { status: 0, body: stdout };
+  return {
+    body: stdout.slice(0, idx),
+    status: Number(stdout.slice(idx + "\n__STATUS__".length)),
+  };
+}
+
+let transport: "https" | "curl" | null = null;
+
+async function request(
+  method: string,
+  path: string,
+  headers?: Record<string, string>,
+  body?: string,
+  timeoutMs = 8_000,
+): Promise<HttpResult> {
+  const url = `${LIGHTER_REST}${path}`;
+  const hdrs = headers ?? {};
+  const order: Array<"https" | "curl"> = transport ? [transport, transport === "https" ? "curl" : "https"] : ["https", "curl"];
+  let last = "no transport";
+  for (const t of order) {
+    try {
+      const res = t === "https" ? await httpsCall(method, url, hdrs, body, timeoutMs) : await curlCall(method, url, hdrs, body, timeoutMs);
+      if (res.status >= 200 && res.status < 300) {
+        if (transport !== t) {
+          transport = t;
+          process.stdout.write(`${new Date().toISOString()} lighter via ${t} ${method} ${path.split("?")[0]}\n`);
+        }
+        return res;
+      }
+      last = `${t} ${res.status} ${path}`;
+    } catch (err) {
+      last = `${t} ${err instanceof Error ? err.message : String(err)} ${path}`;
+    }
+  }
+  throw new Error(`Lighter ${last}`);
+}
+
+async function lighterGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
+  const res = await request("GET", path, headers);
+  return JSON.parse(res.body) as T;
 }
 
 export function mapAccount(raw: RawAccount): LiveAccount {
@@ -154,32 +257,76 @@ function markFromBooks(json: {
   return Number(row?.mark_price);
 }
 
+let lastWsMark = 0;
+let markSocket: WebSocket | null = null;
+let wsRetry: ReturnType<typeof setTimeout> | null = null;
+
+function startMarkSocket() {
+  if (markSocket && (markSocket.readyState === WebSocket.OPEN || markSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  const sock = new WebSocket(LIGHTER_WS);
+  markSocket = sock;
+  sock.addEventListener("open", () => {
+    sock.send(JSON.stringify({ type: "subscribe", channel: `market_stats/${MARKET_ID}` }));
+  });
+  sock.addEventListener("message", (ev) => {
+    try {
+      const msg = JSON.parse(String(ev.data)) as {
+        market_stats?: { market_id?: number; mark_price?: string };
+        market_id?: number;
+        mark_price?: string;
+      };
+      const stats = msg.market_stats ?? msg;
+      const id = Number(stats.market_id);
+      const mark = Number(stats.mark_price);
+      if (mark > 0 && (id === MARKET_ID || !Number.isFinite(id))) lastWsMark = mark;
+    } catch {
+      /* ignore malformed frames */
+    }
+  });
+  sock.addEventListener("close", () => {
+    if (markSocket === sock) markSocket = null;
+    if (wsRetry) clearTimeout(wsRetry);
+    wsRetry = setTimeout(startMarkSocket, 2_000);
+  });
+  sock.addEventListener("error", () => {
+    try {
+      sock.close();
+    } catch {
+      /* already closed */
+    }
+  });
+}
+
 export async function fetchMark(): Promise<number> {
+  startMarkSocket();
   const paths = [
     `/api/v1/orderBooks?market_id=${MARKET_ID}`,
     `/api/v1/orderBookDetails?market_id=${MARKET_ID}`,
     `/api/v1/orderBooks`,
-    `/api/v1/orderBookDetails`,
+    `/api/v1/recentTrades?market_id=${MARKET_ID}&limit=1`,
   ];
   let last = "AUDUSD mark missing";
   for (const path of paths) {
     try {
-      const json = await lighterGet<{ order_book_details?: BookRow[]; order_books?: BookRow[] }>(path);
-      const mark = markFromBooks(json);
+      const json = await lighterGet<{
+        order_book_details?: BookRow[];
+        order_books?: BookRow[];
+        trades?: Array<{ price?: string }>;
+      }>(path);
+      const mark = markFromBooks(json) || Number(json.trades?.[0]?.price);
       if (mark > 0) return mark;
       last = `${path} empty mark`;
     } catch (err) {
       last = err instanceof Error ? err.message : String(err);
     }
   }
-  try {
-    const json = await lighterGet<{ trades?: Array<{ price?: string }> }>(
-      `/api/v1/recentTrades?market_id=${MARKET_ID}&limit=1`,
-    );
-    const mark = Number(json.trades?.[0]?.price);
-    if (mark > 0) return mark;
-  } catch (err) {
-    last = err instanceof Error ? err.message : String(err);
+  if (lastWsMark > 0) return lastWsMark;
+  const until = Date.now() + 3_000;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 200));
+    if (lastWsMark > 0) return lastWsMark;
   }
   throw new Error(last);
 }
@@ -208,19 +355,16 @@ export async function sendTx(tx: {
   body.set("account_index", String(tx.accountIndex));
   body.set("api_key_index", String(tx.apiKeyIndex));
   body.set("price_protection", "true");
-  const res = await fetch(`${LIGHTER_REST}/api/v1/sendTx`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      accept: "application/json",
-      "user-agent": UA,
-    },
-    body,
-    signal: AbortSignal.timeout(15_000),
-  });
-  const json = (await res.json()) as { hash?: string; tx_hash?: string; code?: number; message?: string };
-  if (!res.ok || (json.code && json.code !== 200)) {
-    throw new Error(json.message || `sendTx ${res.status}`);
+  const raw = await request(
+    "POST",
+    "/api/v1/sendTx",
+    { "content-type": "application/x-www-form-urlencoded" },
+    body.toString(),
+    15_000,
+  );
+  const json = JSON.parse(raw.body) as { hash?: string; tx_hash?: string; code?: number; message?: string };
+  if (json.code && json.code !== 200) {
+    throw new Error(json.message || `sendTx ${raw.status}`);
   }
   return { hash: json.tx_hash || json.hash, code: json.code, message: json.message };
 }

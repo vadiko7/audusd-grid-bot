@@ -53,9 +53,11 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
   const cfg: EngineConfig = {
     dynamicSpacing: false,
     armed: false,
+    orderNotional: ORDER_NOTIONAL,
     startingEquity: 0,
     ...config,
   };
+  if (!Number.isFinite(cfg.orderNotional) || cfg.orderNotional < 10) cfg.orderNotional = ORDER_NOTIONAL;
   return {
     config: cfg,
     now: 0,
@@ -262,9 +264,9 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
   if (state.mark <= 0) return { reason: "no mark" };
 
   const remaining = remainingCapacity(state);
-  if (remaining < ORDER_NOTIONAL) {
+  if (remaining < state.config.orderNotional) {
     return {
-      reason: `remaining ${remaining.toFixed(0)} < ${ORDER_NOTIONAL}`,
+      reason: `remaining ${remaining.toFixed(0)} < ${state.config.orderNotional}`,
       extra: { remaining },
     };
   }
@@ -309,7 +311,7 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string)
     }
     return false;
   }
-  const qty = baseQty(state.mark);
+  const qty = baseQty(state.mark, state.config.orderNotional);
   if (qty <= 0) {
     pushLog(state, "gate", "gate — base_qty is 0");
     return false;
@@ -516,6 +518,23 @@ export function setDynamic(state: EngineState, on: boolean): EngineState {
   return state;
 }
 
+export function setOrderNotional(state: EngineState, usd: number): EngineState {
+  const next = Math.round(Number(usd));
+  if (!Number.isFinite(next) || next < 10 || next > 10_000) {
+    pushLog(state, "warn", `notional rejected ${usd} (use 10–10000)`);
+    return state;
+  }
+  if (state.config.orderNotional === next) return state;
+  const prev = state.config.orderNotional;
+  state.config = { ...state.config, orderNotional: next };
+  pushLog(state, "info", `notional $${prev} → $${next} / level`);
+  if (state.config.armed) {
+    cancelAll(state, `notional change $${prev} → $${next}`);
+    maintainPair(state, "re-place ±1 after notional change");
+  }
+  return state;
+}
+
 export function flattenAtMark(state: EngineState): EngineState {
   if (isFlat(state) || state.mark <= 0) return state;
   const qty = Math.abs(state.position.size);
@@ -632,6 +651,7 @@ export function snapshotPublic(state: EngineState) {
     elevated: state.elevated,
     armed: state.config.armed,
     dynamicSpacing: state.config.dynamicSpacing,
+    orderNotional: state.config.orderNotional,
     accountSource: state.accountSource,
     lastFillPrice: state.lastFillPrice,
     lastFillAt: state.lastFillAt,

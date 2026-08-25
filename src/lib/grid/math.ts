@@ -19,9 +19,9 @@ export function roundQty(qty: number): number {
   return Math.round(qty * SIZE_MULT) / SIZE_MULT;
 }
 
-export function baseQty(mark: number): number {
-  if (mark <= 0) return 0;
-  return roundQty(ORDER_NOTIONAL / mark);
+export function baseQty(mark: number, notional = ORDER_NOTIONAL): number {
+  if (mark <= 0 || notional <= 0) return 0;
+  return roundQty(notional / mark);
 }
 
 export function factorFromSpacing(spacingPct: number): number {

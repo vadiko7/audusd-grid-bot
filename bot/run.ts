@@ -1,12 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { MARKET_ID, PRICE_DECIMALS, SIZE_DECIMALS } from "../src/lib/grid/constants.ts";
+import { MARKET_ID, ORDER_NOTIONAL, PRICE_DECIMALS, SIZE_DECIMALS } from "../src/lib/grid/constants.ts";
 import {
   createInitialState,
   flattenAtMark,
   setArmed,
   setDynamic,
+  setOrderNotional,
   snapshotPublic,
   step,
   type PublicSnapshot,
@@ -56,6 +57,31 @@ function log(message: string) {
 
 const envFile = loadDotEnv();
 
+const SETTINGS_PATH = path.resolve("data/settings.json");
+
+type SavedSettings = { orderNotional?: number };
+
+function loadSettings(): SavedSettings {
+  try {
+    if (!existsSync(SETTINGS_PATH)) return {};
+    return JSON.parse(readFileSync(SETTINGS_PATH, "utf8")) as SavedSettings;
+  } catch {
+    return {};
+  }
+}
+
+function saveSettings(partial: SavedSettings) {
+  mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  const next = { ...loadSettings(), ...partial };
+  writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`);
+}
+
+function parseNotional(raw: unknown): number | null {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n) || n < 10 || n > 10_000) return null;
+  return n;
+}
+
 const creds: LighterCreds = {
   accountIndex: Number(reqEnv("LIGHTER_ACCOUNT_INDEX")),
   apiKeyIndex: Number(process.env.LIGHTER_API_KEY_INDEX || "4"),
@@ -72,8 +98,17 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || "8787");
 const WANT_ARM = process.env.ARM === "1";
 const WANT_DYNAMIC = process.env.DYNAMIC_SPACING === "1";
+const saved = loadSettings();
+const startNotional =
+  parseNotional(saved.orderNotional) ??
+  parseNotional(process.env.ORDER_NOTIONAL) ??
+  ORDER_NOTIONAL;
 
-const engine: EngineState = createInitialState({ dynamicSpacing: WANT_DYNAMIC, armed: false });
+const engine: EngineState = createInitialState({
+  dynamicSpacing: WANT_DYNAMIC,
+  armed: false,
+  orderNotional: startNotional,
+});
 if (WANT_DYNAMIC) setDynamic(engine, true);
 
 let lastError: string | null = null;
@@ -213,6 +248,13 @@ button{background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.35rem 
   <button type="button" data-cmd="/disarm">Disarm</button>
   <button type="button" data-cmd="/flatten">Flatten</button>
 </p>
+<p>
+  <label>$ / level
+    <input id="notional" type="number" min="10" max="10000" step="1" style="width:6rem;margin:0 .4rem;background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.3rem">
+  </label>
+  <button type="button" id="setNotional">Set</button>
+  <span class="muted">10–10000 USD. Applies immediately; saved across reboot.</span>
+</p>
 <h2>Working</h2><ul id="orders"><li>none</li></ul>
 <h2>Blotter</h2><ul id="logs"></ul>
 <script>
@@ -232,9 +274,12 @@ async function refresh(){
     +" · mark <code>"+Number(s.mark).toFixed(5)+"</code>"
     +" · equity <code>$"+Number(s.equity).toFixed(2)+"</code>"
     +" · pos <code>"+Number(s.position.size).toFixed(1)+"</code>"
-    +" · remaining <code>$"+Number(s.remaining).toFixed(0)+"</code>";
+    +" · remaining <code>$"+Number(s.remaining).toFixed(0)+"</code>"
+    +" · $/lvl <code>"+Number(s.orderNotional).toFixed(0)+"</code>";
   document.getElementById("err").textContent = s.error || "";
   document.getElementById("tx").textContent = s.lastTx ? "last tx "+s.lastTx : "";
+  const inp = document.getElementById("notional");
+  if (inp && document.activeElement !== inp) inp.value = String(s.orderNotional);
   const orders = (s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(5)+" × "+Number(o.qty).toFixed(1)+"</li>");
   document.getElementById("orders").innerHTML = orders.join("") || "<li>none</li>";
   const logs = [...(s.logs||[])].slice(-40).reverse()
@@ -244,6 +289,11 @@ async function refresh(){
 document.querySelectorAll("button[data-cmd]").forEach(b=>{
   b.onclick = async ()=>{ await fetch(b.dataset.cmd,{method:"POST"}); refresh(); };
 });
+document.getElementById("setNotional").onclick = async ()=>{
+  const usd = document.getElementById("notional").value;
+  await fetch("/notional?usd="+encodeURIComponent(usd),{method:"POST"});
+  refresh();
+};
 refresh();
 setInterval(refresh, 2000);
 </script>
@@ -270,6 +320,21 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, armed: engine.config.armed }));
     return;
   }
+  if (url.pathname === "/notional" && req.method === "POST") {
+    const usd = parseNotional(url.searchParams.get("usd"));
+    if (usd == null) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "usd must be 10–10000" }));
+      return;
+    }
+    setOrderNotional(engine, usd);
+    saveSettings({ orderNotional: engine.config.orderNotional });
+    drainAndSend();
+    log(`http notional $${engine.config.orderNotional}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, orderNotional: engine.config.orderNotional }));
+    return;
+  }
   if (url.pathname === "/status") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify(status()));
@@ -286,7 +351,7 @@ const server = http.createServer((req, res) => {
 });
 
 async function main() {
-  log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`);
+  log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM} notional=$${startNotional} env=${envFile ?? "process-env"}`);
   await refreshLive();
   mark = await fetchMark();
   hourly = await fetchCandles("1h", 30);

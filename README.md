@@ -49,6 +49,14 @@ curl -s -X POST http://127.0.0.1:8787/arm
 
 Disarm / flatten: same with `/disarm` and `/flatten`.
 
+USD per level (anytime, no restart). Desk field **$ / level** → **Set**, or:
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8787/notional?usd=50'
+```
+
+Range 10–10000. Saved in `data/settings.json` so reboot keeps it. If armed, working limits are cancelled and re-placed at the new size.
+
 ## Update code (keys stay)
 
 ```bash

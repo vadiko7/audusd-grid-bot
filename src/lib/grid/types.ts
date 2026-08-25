@@ -70,6 +70,8 @@ export type EngineAction =
 export type EngineConfig = {
   dynamicSpacing: boolean;
   armed: boolean;
+  /** USD notional per grid level. Live-adjustable. */
+  orderNotional: number;
   /** Test-only sim equity. Live mode ignores this. */
   startingEquity: number;
 };

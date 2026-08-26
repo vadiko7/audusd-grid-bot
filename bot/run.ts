@@ -384,6 +384,7 @@ function drainAndSend() {
   if (!jobs.length) return;
   for (const j of jobs) j.book.engine.actions = [];
   busy = true;
+  wantOrderPoll = true;
   (async () => {
     for (const j of jobs) await executeActions(j.book, j.actions);
     wantOrderPoll = true;
@@ -403,6 +404,10 @@ function drainAndSend() {
 
 async function tick() {
   if (stopped) return;
+  if (busy) {
+    timer = setTimeout(tick, 250);
+    return;
+  }
   const now = Date.now();
   try {
     const poll = restReady() && (wantOrderPoll || now - lastAccount > 15_000);
@@ -603,6 +608,11 @@ async function main() {
         );
         if (WANT_ARM) setArmed(book.engine, true);
         if (book.engine.lastFillPrice) saveSettings(book);
+        for (const l of book.engine.logs.slice(-6)) {
+          if (l.level === "gate" || l.level === "place" || l.message.includes("lastFill") || l.message.includes("armed")) {
+            log(`${book.market.symbol} ${l.message}`);
+          }
+        }
       }
       lastAccount = Date.now();
       drainAndSend();

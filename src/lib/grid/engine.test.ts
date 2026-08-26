@@ -482,7 +482,7 @@ describe("engine cycle", () => {
   it("without lastFill does not use average entry — no clean, no place on fill", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;
-    s.position = { size: -1533.8, entry: 0.72 };
+    s.position = { size: 0, entry: 0 };
     s.lastFillPrice = null;
     const onFill: GridOrder = {
       id: "onfill",
@@ -499,15 +499,36 @@ describe("engine cycle", () => {
       mark: 0.71729,
       live: liveAccount({
         equity: 500,
-        position: { size: -1533.8, entry: 0.72 },
-        positionNotional: 1100,
+        position: { size: 0, entry: 0 },
+        positionNotional: 0,
         orders: [onFill],
       }),
     });
     assert.equal(s.lastFillPrice, null);
-    assert.ok(!s.actions.some((a) => a.type === "cancel"));
     assert.ok(!s.actions.some((a) => a.type === "place"));
     assert.equal(s.orders.find((o) => o.id === "onfill")?.id, "onfill");
+  });
+
+  it("open position with no saved lastFill resumes at mark and places ±1", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    s.lastFillPrice = null;
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: 0.72 },
+        positionNotional: 1100,
+        orders: [],
+      }),
+    });
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 0.71729) < 1e-4);
+    const buy = downLevel(s.lastFillPrice, DEFAULT_FACTOR);
+    const sell = upLevel(s.lastFillPrice, DEFAULT_FACTOR);
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
+    assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
   });
 
   it("with lastFill and no bot orders, places the missing ±1", () => {

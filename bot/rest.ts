@@ -356,6 +356,8 @@ export async function fetchNextNonce(accountIndex: number, apiKeyIndex: number):
   if (!Number.isFinite(n)) throw new Error(`nextNonce ${json.message ?? JSON.stringify(json)}`);
   return n;
 }
+
+export async function sendTx(tx: {
   txType: number;
   txInfo: string;
   accountIndex: number;

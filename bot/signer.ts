@@ -136,9 +136,8 @@ export async function signCreateMarket(
 
 export async function signCancelMarket(creds: LighterCreds, marketIndex: number): Promise<SignedTx> {
   const client = await getClient(creds);
-  const api = (client as unknown as { transactionApi: { getNextNonce: (a: number, k: number) => Promise<{ nonce: number }> } })
-    .transactionApi;
-  const { nonce } = await api.getNextNonce(creds.accountIndex, creds.apiKeyIndex);
+  const next = await (client as unknown as { getNextNonce: () => Promise<{ nonce: number }> }).getNextNonce();
+  const nonce = next.nonce;
   const fn = (globalThis as unknown as {
     SignCancelAllOrders?: (
       tif: number,

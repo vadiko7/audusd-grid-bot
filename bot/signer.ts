@@ -135,36 +135,6 @@ export async function signCreateMarket(
   );
 }
 
-export async function signCancelMarket(creds: LighterCreds, marketIndex: number): Promise<SignedTx> {
-  await getClient(creds);
-  const nonce = await fetchNextNonce(creds.accountIndex, creds.apiKeyIndex);
-  const fn = (globalThis as unknown as {
-    SignCancelAllOrders?: (
-      tif: number,
-      time: number,
-      nonce: number,
-      apiKeyIndex: number,
-      accountIndex: number,
-    ) => { error?: string; txType?: number; txInfo?: string };
-  }).SignCancelAllOrders;
-  if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
-  const result = fn(0, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
-  if (result?.error) throw new Error(result.error);
-  if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
-  const txType = Number(result.txType) || 16;
-  let signedNonce: string | number = "?";
-  try {
-    const parsed = JSON.parse(result.txInfo) as { Nonce?: number; nonce?: number };
-    signedNonce = parsed.Nonce ?? parsed.nonce ?? "?";
-  } catch {
-    /* ignore */
-  }
-  process.stdout.write(
-    `${new Date().toISOString()} cancel-all apiNonce ${nonce} txNonce ${signedNonce} txType ${txType}\n`,
-  );
-  return { txType, txInfo: String(result.txInfo) };
-}
-
 export async function refreshNonce(creds: LighterCreds): Promise<void> {
   const client = await getClient(creds);
   const c = client as unknown as { hardRefreshNonce?: () => Promise<void>; acknowledgeFailure?: () => void };
@@ -192,10 +162,6 @@ export async function signCancelOrder(
   const txType = Number(result.txType) || 15;
   process.stdout.write(`${new Date().toISOString()} cancel one ${idx} nonce ${nonce} txType ${txType}\n`);
   return { txType, txInfo: String(result.txInfo) };
-}
-
-export async function signCancelMarket(creds: LighterCreds, _marketIndex: number): Promise<SignedTx> {
-  throw new Error("account cancel-all disabled — cancel individual bot orders only");
 }
 
 export async function signCancelAll(creds: LighterCreds): Promise<SignedTx> {

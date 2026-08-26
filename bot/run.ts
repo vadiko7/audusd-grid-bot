@@ -13,7 +13,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { createAuthToken, dropSigner, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+import { createAuthToken, dropSigner, refreshNonce, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
   const candidates = [
@@ -283,6 +283,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     const signed = await signCancelMarket(creds, m.marketId);
     const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
     lastTx = res.hash || lastTx;
+    await refreshNonce(creds);
     log(`${m.symbol} tx cancel-all market ${m.marketId} ${res.hash ?? ""}`);
   }
   for (const action of actions) {
@@ -328,10 +329,13 @@ function drainAndSend() {
   (async () => {
     for (const j of jobs) await executeActions(j.book, j.actions);
   })()
-    .catch((err) => {
+    .catch(async (err) => {
       lastError = err instanceof Error ? err.message : String(err);
       log(`tx error ${lastError}`);
-      if (/invalid nonce/i.test(lastError)) dropSigner(creds);
+      if (/invalid nonce/i.test(lastError)) {
+        await refreshNonce(creds).catch(() => {});
+        dropSigner(creds);
+      }
     })
     .finally(() => {
       busy = false;

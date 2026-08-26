@@ -135,9 +135,7 @@ export async function signCreateMarket(
 }
 
 export async function signCancelMarket(creds: LighterCreds, marketIndex: number): Promise<SignedTx> {
-  const client = await getClient(creds);
-  const next = await (client as unknown as { getNextNonce: () => Promise<{ nonce: number }> }).getNextNonce();
-  const nonce = next.nonce;
+  await getClient(creds);
   const fn = (globalThis as unknown as {
     SignCancelAllOrders?: (
       tif: number,
@@ -150,10 +148,17 @@ export async function signCancelMarket(creds: LighterCreds, marketIndex: number)
     ) => { error?: string; txType?: number; txInfo?: string };
   }).SignCancelAllOrders;
   if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
-  const result = fn(0, 0, marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  const result = fn(0, 0, marketIndex, 0, -1, creds.apiKeyIndex, creds.accountIndex);
   if (result?.error) throw new Error(result.error);
   if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
   return { txType: Number(result.txType ?? 16), txInfo: String(result.txInfo) };
+}
+
+export async function refreshNonce(creds: LighterCreds): Promise<void> {
+  const client = await getClient(creds);
+  const c = client as unknown as { hardRefreshNonce?: () => Promise<void>; acknowledgeFailure?: () => void };
+  c.acknowledgeFailure?.();
+  if (c.hardRefreshNonce) await c.hardRefreshNonce();
 }
 
 export async function signCancelOrder(

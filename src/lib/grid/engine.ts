@@ -208,7 +208,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.foreignMargin = Number.isFinite(live.foreignMargin) ? Math.max(0, live.foreignMargin) : 0;
   const prev = state.orders;
   const cancelled = new Set(state.cancelledIds);
-  const RETRY_MS = 8_000;
+  const RETRY_MS = 20_000;
   const stillCancelled = new Set<string>();
   for (const id of cancelled) {
     const stillLive = live.orders.some((o) => o.id === id);

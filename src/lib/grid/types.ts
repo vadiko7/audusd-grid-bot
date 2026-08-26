@@ -121,6 +121,7 @@ export type EngineState = {
   impulseJustCooled: boolean;
   foreignMargin: number;
   cancelSentAt: Record<string, number>;
+  unackedPosDelta: number;
 };
 
 export type StepInput = {

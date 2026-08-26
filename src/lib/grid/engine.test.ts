@@ -260,6 +260,88 @@ describe("engine cycle", () => {
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
   });
 
+  it("uses the fill closest to mark, not an older vanished ticket", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const first = 0.7172;
+    const sold = upLevel(first, DEFAULT_FACTOR);
+    s.lastFillPrice = first;
+    s.lastFillAt = 1;
+    s.position = { size: -139.2, entry: first };
+    setArmed(s, true);
+    const oldBuy = {
+      id: "old",
+      side: "buy" as const,
+      price: downLevel(first, DEFAULT_FACTOR),
+      qty: 139.2,
+      notional: 100,
+      placedAt: 1,
+    };
+    const newSell = { id: "new", side: "sell" as const, price: sold, qty: 139.2, notional: 100, placedAt: 1 };
+    step(s, {
+      now: 1_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -139.2, entry: first },
+        positionNotional: 100,
+        orders: [oldBuy, newSell],
+      }),
+    });
+    s.actions = [];
+    step(s, {
+      now: 2_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -278.4, entry: (first + sold) / 2 },
+        positionNotional: 200,
+        orders: [],
+      }),
+    });
+    assert.equal(s.lastFillPrice, sold);
+    const innerBuy = downLevel(sold, DEFAULT_FACTOR);
+    const innerSell = upLevel(sold, DEFAULT_FACTOR);
+    const placed = s.actions.filter((a) => a.type === "place").map((a) => a.price);
+    const working = s.orders.map((o) => o.price);
+    const prices = [...placed, ...working];
+    assert.ok(prices.some((p) => Math.abs(p - innerSell) < 1e-8), `need +1 ${innerSell} got ${prices}`);
+    assert.ok(prices.some((p) => Math.abs(p - innerBuy) < 1e-8), `need -1 ${innerBuy} got ${prices}`);
+    assert.ok(prices.every((p) => Math.abs(p - sold) > 1e-8), `must not re-place fill ${sold}`);
+  });
+
+  it("position move then vanished order still counts as that fill (lagged REST)", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const first = 0.7172;
+    const sold = upLevel(first, DEFAULT_FACTOR);
+    s.lastFillPrice = first;
+    s.lastFillAt = 1;
+    s.position = { size: -139.2, entry: first };
+    setArmed(s, true);
+    const newSell = { id: "new", side: "sell" as const, price: sold, qty: 139.2, notional: 100, placedAt: 1 };
+    step(s, {
+      now: 1_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -278.4, entry: sold },
+        positionNotional: 200,
+        orders: [newSell],
+      }),
+    });
+    assert.equal(s.lastFillPrice, first);
+    step(s, {
+      now: 2_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -278.4, entry: sold },
+        positionNotional: 200,
+        orders: [],
+      }),
+    });
+    assert.equal(s.lastFillPrice, sold);
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

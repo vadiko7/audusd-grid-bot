@@ -96,6 +96,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     impulseJustCooled: false,
     foreignMargin: 0,
     cancelSentAt: {},
+    unackedPosDelta: 0,
   };
 }
 
@@ -226,41 +227,55 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   const prevSize = state.position.size;
   const nextSize = live.position.size;
   const posDelta = nextSize - prevSize;
-  const vanished = prev.filter(
-    (order) =>
-      !order.id.startsWith("pending:") &&
-      !nextIds.has(order.id) &&
-      !cancelled.has(order.id) &&
-      !state.cancelSentAt[order.id],
-  );
+  state.unackedPosDelta += posDelta;
+  const vanished = prev.filter((order) => {
+    if (nextIds.has(order.id)) return false;
+    if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;
+    if (order.id.startsWith("pending:")) {
+      return !liveOpen.some((o) => o.side === order.side && sameRung(o.price, order.price, state.factor));
+    }
+    return true;
+  });
   const eps = 1e-6;
-  const fillCandidate = vanished
-    .filter((o) => {
-      const dir = o.side === "buy" ? 1 : -1;
-      return posDelta * dir > eps && Math.abs(posDelta) >= o.qty * 0.2;
-    })
-    .sort((a, b) => Math.abs(a.qty - Math.abs(posDelta)) - Math.abs(b.qty - Math.abs(posDelta)))[0];
-
-  for (const order of vanished) {
-    if (fillCandidate && order.id === fillCandidate.id) {
-      const fill: Fill = {
-        orderId: order.id,
-        side: order.side,
-        price: order.price,
-        qty: order.qty,
-        ts: state.now,
-      };
-      state.fillsThisCycle.push(fill);
-      state.lastFillPrice = fill.price;
-      state.lastFillSide = fill.side;
-      state.lastFillAt = fill.ts;
+  const dirOf = (o: GridOrder) => (o.side === "buy" ? 1 : -1);
+  let budget = state.unackedPosDelta;
+  const filledIds = new Set<string>();
+  const pool = [...vanished];
+  while (pool.length) {
+    const cand = pool
+      .filter((o) => !filledIds.has(o.id) && budget * dirOf(o) > eps && Math.abs(budget) >= o.qty * 0.2)
+      .sort((a, b) => Math.abs(a.price - state.mark) - Math.abs(b.price - state.mark))[0];
+    if (!cand) break;
+    filledIds.add(cand.id);
+    budget -= dirOf(cand) * cand.qty;
+    const fill: Fill = {
+      orderId: cand.id,
+      side: cand.side,
+      price: cand.price,
+      qty: cand.qty,
+      ts: state.now,
+    };
+    state.fillsThisCycle.push(fill);
+  }
+  if (state.fillsThisCycle.length) {
+    const latest = state.fillsThisCycle.reduce((a, b) =>
+      Math.abs(a.price - state.mark) <= Math.abs(b.price - state.mark) ? a : b,
+    );
+    state.lastFillPrice = latest.price;
+    state.lastFillSide = latest.side;
+    state.lastFillAt = latest.ts;
+    for (const fill of state.fillsThisCycle) {
       pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
         side: fill.side,
         price: fill.price,
         qty: fill.qty,
       });
-      continue;
     }
+  }
+  state.unackedPosDelta = Math.abs(budget) < 0.05 ? 0 : budget;
+
+  for (const order of vanished) {
+    if (filledIds.has(order.id)) continue;
     pushLog(
       state,
       "info",
@@ -268,9 +283,9 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     );
   }
 
-  const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id));
+  const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id) && !filledIds.has(o.id));
   const stillPending = pending.filter(
-    (p) => !liveOpen.some((o) => o.side === p.side && Math.abs(o.price - p.price) < 1e-8),
+    (p) => !liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor)),
   );
 
   const wasNone = state.accountSource !== "live";
@@ -279,11 +294,24 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.position = { ...live.position };
   state.realizedPnl = live.realizedPnl;
   state.unrealizedPnl = live.unrealizedPnl;
-  state.orders = [...liveOpen, ...stillPending];
+  state.orders = dedupRungs(state, [...liveOpen, ...stillPending]);
   state.cancelledIds = [...stillCancelled];
   if (wasNone) {
     pushLog(state, "info", `live account ${live.accountIndex} · equity $${live.equity.toFixed(2)}`);
   }
+}
+
+function dedupRungs(state: EngineState, orders: GridOrder[]): GridOrder[] {
+  const keep: GridOrder[] = [];
+  for (const o of orders) {
+    const i = keep.findIndex((k) => k.side === o.side && sameRung(k.price, o.price, state.factor));
+    if (i < 0) {
+      keep.push(o);
+      continue;
+    }
+    if (keep[i].id.startsWith("pending:") && !o.id.startsWith("pending:")) keep[i] = o;
+  }
+  return keep;
 }
 
 function emit(state: EngineState, action: EngineAction) {
@@ -327,6 +355,10 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
       reason: `impulse ${state.impulse} — freeze new limits until cool (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
       extra: { delta: state.impulseDeltaPct, impulse: state.impulse },
     };
+  }
+
+  if (state.lastFillPrice && sameRung(target, state.lastFillPrice, state.factor)) {
+    return { reason: `just-filled level ${target.toFixed(5)}` };
   }
 
   if (state.orders.filter((o) => o.side === side).length >= 1) {
@@ -734,8 +766,11 @@ function runArmedCycle(state: EngineState) {
       state.fillsThisCycle.push(fill);
       postFillMissed(state, fill);
     }
-  } else {
-    for (const fill of state.fillsThisCycle) postFillMissed(state, fill);
+  } else if (state.fillsThisCycle.length) {
+    const latest = state.fillsThisCycle.reduce((a, b) =>
+      Math.abs(a.price - state.mark) <= Math.abs(b.price - state.mark) ? a : b,
+    );
+    postFillMissed(state, latest);
   }
 
   if (state.fillsThisCycle.length === 0) impulseCoolCatch(state);

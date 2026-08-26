@@ -66,7 +66,7 @@ export type LiveAccount = {
 };
 
 export type EngineAction =
-  | { type: "place"; side: Side; price: number; qty: number; why: string; reduceOnly?: boolean }
+  | { type: "place"; side: Side; price: number; qty: number; why: string; reduceOnly?: boolean; exec?: "limit" | "market" }
   | { type: "cancel"; orderId: string; side: Side; price: number; why: string }
   | { type: "cancel_all"; why: string };
 
@@ -116,6 +116,7 @@ export type EngineState = {
   atrPct: number;
   actions: EngineAction[];
   cancelledIds: string[];
+  impulseJustCooled: boolean;
 };
 
 export type StepInput = {

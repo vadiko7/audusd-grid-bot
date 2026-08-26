@@ -17,7 +17,9 @@ import {
   inProximity,
   proximityPct,
   roundPrice,
+  roundQty,
   signedSize,
+  stepsAway,
   upLevel,
 } from "./math.ts";
 import type {
@@ -90,6 +92,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     atrPct: 0,
     actions: [],
     cancelledIds: [],
+    impulseJustCooled: false,
   };
 }
 
@@ -488,7 +491,8 @@ function updateImpulse(state: EngineState, input: StepInput) {
   });
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
-      pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — resume only current ±1`);
+      state.impulseJustCooled = true;
+      pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
     } else {
       pushLog(
         state,
@@ -579,12 +583,47 @@ export function resetSession(state: EngineState): EngineState {
   return next;
 }
 
+function impulseCoolCatch(state: EngineState): boolean {
+  if (!state.impulseJustCooled) return false;
+  state.impulseJustCooled = false;
+  const anchor = fillAnchor(state);
+  if (!anchor || state.mark <= 0 || !state.config.armed) return false;
+  const m = state.config.market;
+  const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
+  const prox = proximityPct(state.spacingPct, m);
+  const far = distPct > 2 * prox;
+  const rawSteps = stepsAway(anchor, state.mark, state.factor);
+  const nLevels = far ? Math.max(1, Math.min(4, Math.round(rawSteps))) : 1;
+  const side: Side = state.mark > anchor ? "sell" : "buy";
+  const one = baseQty(state.mark, state.config.orderNotional, m.sizeDecimals);
+  const remaining = remainingCapacity(state);
+  const maxByCap = Math.max(0, Math.floor(remaining / Math.max(1, state.config.orderNotional)));
+  if (maxByCap < 1 || one <= 0) return false;
+  const n = Math.max(1, Math.min(nLevels, maxByCap));
+  const qty = roundQty(one * n, m.sizeDecimals);
+  const price = roundPrice(state.mark, m.priceDecimals);
+  const exec = far ? "market" : "limit";
+  cancelAll(state, `impulse cool catch ${exec}`);
+  emit(state, { type: "place", side, price, qty, why: `impulse-cool ${exec} ${n} lvl`, exec });
+  state.lastFillPrice = state.mark;
+  state.lastFillAt = state.now;
+  pushLog(
+    state,
+    "place",
+    `impulse cool ${exec} ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} · ${n} missed lvl · Δ ${distPct.toFixed(2)}% vs ${2 * prox}% (2×prox)`,
+    { side, price, qty, exec, n, distPct, far },
+  );
+  return true;
+}
+
 function runArmedCycle(state: EngineState) {
   const currentBias = bias(state);
   const anchor = fillAnchor(state);
   const steps = state.config.market.adverseSteps;
   let waitFill = false;
-  if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
+  if (state.impulseJustCooled) {
+    /* distance handled by impulseCoolCatch */
+  } else if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
     recenter(state, `adverse ≥ ${steps} steps against short`);
     waitFill = true;
   } else if (anchor && currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor, steps)) {
@@ -603,6 +642,10 @@ function runArmedCycle(state: EngineState) {
     }
   } else {
     for (const fill of state.fillsThisCycle) postFillMissed(state, fill);
+  }
+
+  if (state.fillsThisCycle.length === 0 && impulseCoolCatch(state)) {
+    return;
   }
 
   if (!waitFill) maintainPair(state, "maintain ±1");

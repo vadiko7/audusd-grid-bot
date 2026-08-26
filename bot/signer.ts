@@ -110,6 +110,30 @@ export async function signCreateLimit(
   );
 }
 
+export async function signCreateMarket(
+  creds: LighterCreds,
+  params: {
+    marketIndex: number;
+    clientOrderIndex: number;
+    baseAmount: number;
+    avgExecutionPrice: number;
+    isAsk: boolean;
+    reduceOnly?: boolean;
+  },
+): Promise<SignedTx> {
+  const client = await getClient(creds);
+  return captureSign(client, () =>
+    client.createMarketOrder({
+      marketIndex: params.marketIndex,
+      clientOrderIndex: params.clientOrderIndex,
+      baseAmount: params.baseAmount,
+      avgExecutionPrice: params.avgExecutionPrice,
+      isAsk: params.isAsk,
+      reduceOnly: Boolean(params.reduceOnly),
+    }),
+  );
+}
+
 export async function signCancelOrder(
   creds: LighterCreds,
   params: { marketIndex: number; orderIndex: number },

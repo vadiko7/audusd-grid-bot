@@ -165,6 +165,25 @@ export async function signCancelOrder(
   return { txType, txInfo: String(result.txInfo) };
 }
 
+export async function signCancelAllAccount(creds: LighterCreds): Promise<SignedTx> {
+  await getClient(creds);
+  const nonce = await fetchNextNonce(creds.accountIndex, creds.apiKeyIndex);
+  const fn = (globalThis as unknown as {
+    SignCancelAllOrders?: (
+      tif: number,
+      time: number,
+      nonce: number,
+      apiKeyIndex: number,
+      accountIndex: number,
+    ) => { error?: string; txType?: number; txInfo?: string };
+  }).SignCancelAllOrders;
+  if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
+  const result = fn(0, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  if (result?.error) throw new Error(result.error);
+  if (!result?.txInfo) throw new Error("WASM cancel-all produced no tx");
+  return { txType: Number(result.txType) || 16, txInfo: String(result.txInfo) };
+}
+
 export async function signCancelAll(creds: LighterCreds): Promise<SignedTx> {
   const client = await getClient(creds);
   return captureSign(client, () => client.cancelAllOrders(SignerClient.CANCEL_ALL_TIF_IMMEDIATE, Date.now()));

@@ -274,16 +274,10 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
   }
 
-  if (state.impulse === "buy" && side === "buy") {
+  if (state.impulse !== "none") {
     return {
-      reason: `impulse BUY blocks buy — don't chase (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
-      extra: { delta: state.impulseDeltaPct },
-    };
-  }
-  if (state.impulse === "sell" && side === "sell") {
-    return {
-      reason: `impulse SELL blocks sell — don't chase (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
-      extra: { delta: state.impulseDeltaPct },
+      reason: `impulse ${state.impulse} — freeze new limits until cool (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
+      extra: { delta: state.impulseDeltaPct, impulse: state.impulse },
     };
   }
 
@@ -436,10 +430,37 @@ function maintainPair(state: EngineState, why: string) {
 }
 
 function postFillMissed(state: EngineState, fill: Fill) {
-  const up = upLevel(fill.price, state.factor);
-  const down = downLevel(fill.price, state.factor);
-  if (!hasNear(state, up)) placeLimit(state, "sell", up, "post-fill missed +1");
-  if (!hasNear(state, down)) placeLimit(state, "buy", down, "post-fill missed −1");
+  const m = state.config.market;
+  const up = upLevel(fill.price, state.factor, m.priceDecimals);
+  const down = downLevel(fill.price, state.factor, m.priceDecimals);
+  const prox = proximityPct(state.spacingPct, m);
+  const keep: GridOrder[] = [];
+  for (const order of state.orders) {
+    const belongs = inProximity(order.price, up, prox) || inProximity(order.price, down, prox);
+    if (belongs) keep.push(order);
+    else if (!state.cancelledIds.includes(order.id)) {
+      state.cancelledIds.push(order.id);
+      emit(state, {
+        type: "cancel",
+        orderId: order.id,
+        side: order.side,
+        price: order.price,
+        why: "old level after fill",
+      });
+      pushLog(
+        state,
+        "clean",
+        `clean ${order.side.toUpperCase()} ${order.price.toFixed(m.priceDecimals)} — old level after fill (keep ±1 ${down.toFixed(m.priceDecimals)} / ${up.toFixed(m.priceDecimals)})`,
+      );
+    }
+  }
+  state.orders = keep;
+  if (state.impulse !== "none") {
+    pushLog(state, "impulse", `post-fill skip new ±1 until impulse cools (anchor ${fill.price.toFixed(m.priceDecimals)})`);
+    return;
+  }
+  if (!hasNear(state, up)) placeLimit(state, "sell", up, "post-fill +1");
+  if (!hasNear(state, down)) placeLimit(state, "buy", down, "post-fill −1");
 }
 
 function lockFixedSpacing(state: EngineState) {
@@ -468,10 +489,12 @@ function updateImpulse(state: EngineState, input: StepInput) {
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
       pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — resume only current ±1`);
-    } else if (resolved.impulse === "buy") {
-      pushLog(state, "impulse", `impulse BUY — BLOCK new buys, don't chase (Δ ${resolved.deltaPct.toFixed(3)}%)`);
     } else {
-      pushLog(state, "impulse", `impulse SELL — BLOCK new sells, don't chase (Δ ${resolved.deltaPct.toFixed(3)}%)`);
+      pushLog(
+        state,
+        "impulse",
+        `impulse ${resolved.impulse.toUpperCase()} — freeze new limits until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+      );
     }
   }
   state.impulse = resolved.impulse;

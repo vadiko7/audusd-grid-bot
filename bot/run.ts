@@ -14,7 +14,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { sameRung } from "../src/lib/grid/math.ts";
+import { downLevel, sameRung, stepsAway, upLevel } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCancelAllAccount, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
@@ -317,6 +317,16 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   }
 }
 
+function isGridTicket(book: Book, order: { price: number; notional: number }): boolean {
+  const a = book.engine.lastFillPrice || (Math.abs(book.engine.position.size) > 1 ? book.engine.position.entry : 0);
+  if (!(a > 0)) return false;
+  const n = book.engine.config.orderNotional;
+  if (!(order.notional >= 10 && order.notional <= n * 1.6)) return false;
+  const steps = stepsAway(a, order.price, book.engine.factor);
+  const nearest = Math.round(steps);
+  return nearest >= 0 && nearest <= 12 && Math.abs(steps - nearest) < 0.3;
+}
+
 function drainAndSend() {
   if (busy) return;
   const jobs = books
@@ -335,8 +345,8 @@ function drainAndSend() {
         b.manuals
           .filter((o) => {
             if (b.giveUp.has(o.id)) return false;
-            if (b.engine.lastFillPrice && sameRung(o.price, b.engine.lastFillPrice, b.engine.factor)) return false;
-            return !drop.some((d) => d.side === o.side && Math.abs(d.price - o.price) < 1e-8);
+            if (isGridTicket(b, o)) return false;
+            return true;
           })
           .map((o) => ({ book: b, order: o })),
       );

@@ -222,30 +222,49 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   }
   const liveOpen = live.orders;
   const nextIds = new Set(liveOpen.map((o) => o.id));
+  const prevSize = state.position.size;
+  const nextSize = live.position.size;
+  const posDelta = nextSize - prevSize;
+  const vanished = prev.filter(
+    (order) =>
+      !order.id.startsWith("pending:") &&
+      !nextIds.has(order.id) &&
+      !cancelled.has(order.id) &&
+      !state.cancelSentAt[order.id],
+  );
+  const eps = 1e-6;
+  const fillCandidate = vanished
+    .filter((o) => {
+      const dir = o.side === "buy" ? 1 : -1;
+      return posDelta * dir > eps && Math.abs(posDelta) >= o.qty * 0.2;
+    })
+    .sort((a, b) => Math.abs(a.qty - Math.abs(posDelta)) - Math.abs(b.qty - Math.abs(posDelta)))[0];
 
-  for (const order of prev) {
-    if (order.id.startsWith("pending:")) continue;
-    if (nextIds.has(order.id)) continue;
-    if (cancelled.has(order.id) || state.cancelSentAt[order.id]) {
-      delete state.cancelSentAt[order.id];
+  for (const order of vanished) {
+    if (fillCandidate && order.id === fillCandidate.id) {
+      const fill: Fill = {
+        orderId: order.id,
+        side: order.side,
+        price: order.price,
+        qty: order.qty,
+        ts: state.now,
+      };
+      state.fillsThisCycle.push(fill);
+      state.lastFillPrice = fill.price;
+      state.lastFillSide = fill.side;
+      state.lastFillAt = fill.ts;
+      pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
+        side: fill.side,
+        price: fill.price,
+        qty: fill.qty,
+      });
       continue;
     }
-    const fill: Fill = {
-      orderId: order.id,
-      side: order.side,
-      price: order.price,
-      qty: order.qty,
-      ts: state.now,
-    };
-    state.fillsThisCycle.push(fill);
-    state.lastFillPrice = fill.price;
-    state.lastFillSide = fill.side;
-    state.lastFillAt = fill.ts;
-    pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
-      side: fill.side,
-      price: fill.price,
-      qty: fill.qty,
-    });
+    pushLog(
+      state,
+      "info",
+      `order gone ${order.side.toUpperCase()} ${order.price.toFixed(5)} — not a fill (pos ${prevSize.toFixed(1)} → ${nextSize.toFixed(1)})`,
+    );
   }
 
   const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id));
@@ -274,9 +293,9 @@ function emit(state: EngineState, action: EngineAction) {
   }
 }
 
-function hasNear(state: EngineState, target: number): boolean {
+function hasNear(state: EngineState, target: number, side?: Side): boolean {
   const prox = proximityPct(state.spacingPct, state.config.market);
-  return state.orders.some((o) => inProximity(o.price, target, prox));
+  return state.orders.some((o) => (!side || o.side === side) && inProximity(o.price, target, prox));
 }
 
 type GateFail = { reason: string; extra?: Record<string, string | number | boolean> };
@@ -297,7 +316,7 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     };
   }
 
-  if (hasNear(state, target)) {
+  if (hasNear(state, target, side)) {
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
   }
 
@@ -476,8 +495,8 @@ function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);
-  if (!hasNear(state, levels.sell)) placeLimit(state, "sell", levels.sell, why);
-  if (!isFlat(state) && !hasNear(state, levels.buy)) placeLimit(state, "buy", levels.buy, why);
+  if (!hasNear(state, levels.sell, "sell")) placeLimit(state, "sell", levels.sell, why);
+  if (!isFlat(state) && !hasNear(state, levels.buy, "buy")) placeLimit(state, "buy", levels.buy, why);
 }
 
 function postFillMissed(state: EngineState, fill: Fill) {
@@ -510,8 +529,8 @@ function postFillMissed(state: EngineState, fill: Fill) {
     pushLog(state, "impulse", `post-fill skip new ±1 until impulse cools (anchor ${fill.price.toFixed(m.priceDecimals)})`);
     return;
   }
-  if (!hasNear(state, up)) placeLimit(state, "sell", up, "post-fill +1");
-  if (!hasNear(state, down)) placeLimit(state, "buy", down, "post-fill −1");
+  if (!hasNear(state, up, "sell")) placeLimit(state, "sell", up, "post-fill +1");
+  if (!hasNear(state, down, "buy")) placeLimit(state, "buy", down, "post-fill −1");
 }
 
 function lockFixedSpacing(state: EngineState) {

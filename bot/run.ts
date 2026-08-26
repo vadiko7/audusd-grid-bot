@@ -224,6 +224,7 @@ let lastError: string | null = null;
 let lastTx: string | null = null;
 let auth: { token: string; exp: number } | null = null;
 let lastAccount = 0;
+let wantOrderPoll = false;
 let clientSeq = Date.now();
 let busy = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -360,6 +361,7 @@ function drainAndSend() {
       }
     }
     for (const j of jobs) await executeActions(j.book, j.actions);
+    wantOrderPoll = true;
   })()
     .catch(async (err) => {
       lastError = err instanceof Error ? err.message : String(err);
@@ -378,12 +380,13 @@ async function tick() {
   if (stopped) return;
   const now = Date.now();
   try {
-    const poll = restReady() && now - lastAccount > 15_000;
+    const poll = restReady() && (wantOrderPoll || now - lastAccount > 15_000);
     for (const book of books) {
       book.mark = await fetchMark(book.market.marketId);
       if (poll) await refreshLive(book);
     }
     if (poll) {
+      wantOrderPoll = false;
       applySharedMargin();
       lastAccount = now;
       lastError = null;

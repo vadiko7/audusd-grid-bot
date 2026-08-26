@@ -54,8 +54,9 @@ function log(message: string) {
 }
 
 const envFile = loadDotEnv();
-const SETTINGS_PATH = path.resolve("data/settings.json");
-const OWNED_PATH = path.resolve("data/owned.json");
+const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+const SETTINGS_PATH = path.join(ROOT, "data/settings.json");
+const OWNED_PATH = path.join(ROOT, "data/owned.json");
 
 const OWNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -570,6 +571,13 @@ async function main() {
   log(
     `bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} markets=${books.map((b) => b.market.symbol).join(",")} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`,
   );
+  for (const b of books) {
+    if (b.engine.lastFillPrice) {
+      log(`${b.market.symbol} lastFill restored ${b.engine.lastFillPrice}  $/lvl ${b.engine.config.orderNotional}`);
+    } else {
+      log(`${b.market.symbol} lastFill unknown — will infer from bot tickets or wait for a fill`);
+    }
+  }
   if (!existsSync(path.resolve(".venv/bin/python"))) {
     log("cancel signer: no .venv — leftovers cannot cancel until: sudo apt-get install -y python3-venv && python3 -m venv .venv && .venv/bin/pip install git+https://github.com/elliottech/lighter-python.git");
   } else {

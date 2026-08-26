@@ -139,6 +139,31 @@ function fillAnchor(state: EngineState): number | null {
   return null;
 }
 
+function inferLastFill(state: EngineState, orders: GridOrder[]): number | null {
+  const live = orders.filter((o) => !o.id.startsWith("pending:") && o.mine !== false);
+  if (!live.length) return null;
+  const m = state.config.market;
+  const f = state.factor;
+  const buys = live.filter((o) => o.side === "buy");
+  const sells = live.filter((o) => o.side === "sell");
+  if (buys.length >= 1 && sells.length >= 1) {
+    const buy = buys.reduce((a, b) => (a.price > b.price ? a : b));
+    const sell = sells.reduce((a, b) => (a.price < b.price ? a : b));
+    const steps = stepsAway(buy.price, sell.price, f);
+    if (Math.abs(steps - 2) < 0.35) return upLevel(buy.price, f, m.priceDecimals);
+  }
+  if (!(state.mark > 0)) return null;
+  const nearest = [...live].sort((a, b) => Math.abs(a.price - state.mark) - Math.abs(b.price - state.mark))[0];
+  const dist = stepsAway(state.mark, nearest.price, f);
+  if (dist < 0.3) return nearest.price;
+  if (Math.abs(dist - 1) < 0.35) {
+    return nearest.side === "sell"
+      ? downLevel(nearest.price, f, m.priceDecimals)
+      : upLevel(nearest.price, f, m.priceDecimals);
+  }
+  return null;
+}
+
 function anchorPrice(state: EngineState): number {
   return fillAnchor(state) ?? state.mark;
 }
@@ -299,6 +324,18 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.unrealizedPnl = live.unrealizedPnl;
   state.orders = dedupRungs(state, [...liveOpen, ...stillPending]);
   state.cancelledIds = [...stillCancelled];
+  if (!state.lastFillPrice) {
+    const inferred = inferLastFill(state, state.orders);
+    if (inferred) {
+      state.lastFillPrice = inferred;
+      state.lastFillAt = state.now;
+      pushLog(
+        state,
+        "info",
+        `lastFill inferred ${inferred.toFixed(state.config.market.priceDecimals)} from bot tickets`,
+      );
+    }
+  }
   if (wasNone) {
     pushLog(state, "info", `live account ${live.accountIndex} · equity $${live.equity.toFixed(2)}`);
   }
@@ -581,7 +618,12 @@ function walkCrossedLevels(state: EngineState): Fill | null {
 
 export function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
-  if (!fillAnchor(state)) return;
+  if (!fillAnchor(state)) {
+    if (!state.logs.some((l) => l.message.includes("no lastFill"))) {
+      pushLog(state, "gate", "no lastFill — waiting for a fill before placing ±1");
+    }
+    return;
+  }
   const levels = validLevels(state);
   if (!hasNear(state, levels.sell, "sell")) placeLimit(state, "sell", levels.sell, why);
   if (!isFlat(state) && !hasNear(state, levels.buy, "buy")) placeLimit(state, "buy", levels.buy, why);

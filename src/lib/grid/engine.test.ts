@@ -491,7 +491,7 @@ describe("engine cycle", () => {
       qty: 139.4,
       notional: 100,
       placedAt: 1,
-      mine: true,
+      mine: false,
     };
     setArmed(s, true);
     step(s, {
@@ -508,6 +508,55 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel"));
     assert.ok(!s.actions.some((a) => a.type === "place"));
     assert.equal(s.orders.find((o) => o.id === "onfill")?.id, "onfill");
+  });
+
+  it("with lastFill and no bot orders, places the missing ±1", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -1533.8, entry: last };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: last },
+        positionNotional: 1100,
+        orders: [],
+      }),
+    });
+    const buy = downLevel(last, DEFAULT_FACTOR);
+    const sell = upLevel(last, DEFAULT_FACTOR);
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
+    assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
+  });
+
+  it("infers lastFill from an existing bot ±1 pair", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    const buy = downLevel(last, DEFAULT_FACTOR);
+    const sell = upLevel(last, DEFAULT_FACTOR);
+    s.lastFillPrice = null;
+    s.position = { size: -1533.8, entry: last };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: last },
+        positionNotional: 1100,
+        orders: [
+          { id: "b", side: "buy", price: buy, qty: 139.4, notional: 100, placedAt: 1, mine: true },
+          { id: "s", side: "sell", price: sell, qty: 139.4, notional: 100, placedAt: 1, mine: true },
+        ],
+      }),
+    });
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - last) < 1e-4);
+    assert.ok(!s.actions.some((a) => a.type === "place"));
   });
 
   it("when flat and armed with no fill, does not seed from mark", () => {

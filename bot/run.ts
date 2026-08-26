@@ -253,6 +253,7 @@ let lastError: string | null = null;
 let lastTx: string | null = null;
 let auth: { token: string; exp: number } | null = null;
 let lastAccount = 0;
+let lastBeat = 0;
 let wantOrderPoll = false;
 let clientSeq = Date.now();
 let busy = false;
@@ -444,6 +445,20 @@ async function tick() {
       }
     }
     drainAndSend();
+    if (now - lastBeat > 20_000) {
+      lastBeat = now;
+      for (const book of books) {
+        const m = book.market;
+        const working = book.engine.orders
+          .filter((o) => !o.id.startsWith("pending:"))
+          .map((o) => `${o.side} ${o.price.toFixed(m.priceDecimals)}`)
+          .join(" · ");
+        const lf = book.engine.lastFillPrice;
+        log(
+          `${m.symbol} watch mark ${book.mark.toFixed(m.priceDecimals)} lastFill ${lf ? lf.toFixed(m.priceDecimals) : "none"} working ${working || "none"}`,
+        );
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     lastError = message;

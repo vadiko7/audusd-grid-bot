@@ -355,6 +355,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     if (result === "missing") continue;
     log(`${m.symbol} cancel leftover ${action.orderId} ${result} — will retry`);
   }
+  await refreshNonce(creds).catch(() => {});
   for (const action of actions) {
     if (action.type !== "place") continue;
     const clientOrderIndex = clientSeq++;

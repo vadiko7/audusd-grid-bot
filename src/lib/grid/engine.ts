@@ -349,6 +349,20 @@ function ingestLive(state: EngineState, live: LiveAccount) {
         `lastFill resume mark ${px.toFixed(state.config.market.priceDecimals)} (open pos, no saved fill)`,
       );
     }
+  } else if (state.mark > 0) {
+    const stale =
+      state.lastFillAt == null || state.now - state.lastFillAt > 60_000;
+    const steps = stepsAway(state.lastFillPrice, state.mark, state.factor);
+    if (stale && steps >= 1) {
+      const px = roundPrice(state.mark, state.config.market.priceDecimals);
+      pushLog(
+        state,
+        "info",
+        `lastFill snap ${state.lastFillPrice.toFixed(state.config.market.priceDecimals)} → mark ${px.toFixed(state.config.market.priceDecimals)} (${steps.toFixed(2)} steps stale)`,
+      );
+      state.lastFillPrice = px;
+      state.lastFillAt = state.now;
+    }
   }
   if (wasNone) {
     pushLog(state, "info", `live account ${live.accountIndex} · equity $${live.equity.toFixed(2)}`);
@@ -736,7 +750,10 @@ export function setArmed(state: EngineState, armed: boolean): EngineState {
   state.config = { ...state.config, armed };
   if (armed) {
     pushLog(state, "info", "armed — restore ±1 around last fill");
-    if (state.accountSource === "live") maintainPair(state, "arm restore ±1");
+    if (state.accountSource === "live") {
+      cleanInvalid(state);
+      maintainPair(state, "arm restore ±1");
+    }
   } else {
     cancelAll(state, "disarmed");
     pushLog(state, "info", "disarmed — working limits cancelled");

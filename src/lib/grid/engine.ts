@@ -439,6 +439,7 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string)
     qty,
     notional: qty * price,
     placedAt: state.now,
+    mine: true,
   };
   state.orders = [...state.orders, order];
   emit(state, { type: "place", side, price, qty, why });
@@ -456,18 +457,24 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string)
   return true;
 }
 
+function isMineOrder(order: GridOrder): boolean {
+  return order.mine !== false;
+}
+
 function cancelAll(state: EngineState, reason: string) {
-  if (state.orders.length === 0) {
+  const mine = state.orders.filter(isMineOrder);
+  if (mine.length === 0) {
     state.lastCleanReason = reason;
     return;
   }
-  const n = state.orders.length;
-  for (const o of [...state.orders]) dropOrder(state, o, reason);
+  const n = mine.length;
+  for (const o of mine) dropOrder(state, o, reason);
   state.lastCleanReason = reason;
-  pushLog(state, "clean", `clean ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (other markets untouched)`);
+  pushLog(state, "clean", `clean ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (foreign orders left)`);
 }
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {
+  if (!isMineOrder(order)) return;
   if (state.cancelledIds.includes(order.id)) return;
   state.cancelledIds.push(order.id);
   emit(state, {
@@ -508,6 +515,10 @@ function cleanInvalid(state: EngineState) {
   const keepIds = new Set([keepBuy?.id, keepSell?.id].filter(Boolean) as string[]);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
+    if (!isMineOrder(order)) {
+      keep.push(order);
+      continue;
+    }
     if (keepIds.has(order.id)) {
       keep.push(order);
       continue;

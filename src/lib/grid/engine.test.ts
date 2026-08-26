@@ -13,6 +13,7 @@ import {
 } from "./engine.ts";
 import { baseQty, downLevel, factorFromSpacing, roundPrice, upLevel } from "./math.ts";
 import { classifyRegime, spacingFromAtr } from "./atr.ts";
+import type { GridOrder } from "./types.ts";
 import { nextImpulse } from "./impulse.ts";
 import type { Candle, EngineState, LiveAccount } from "./types.ts";
 
@@ -409,6 +410,39 @@ describe("engine cycle", () => {
     });
     assert.ok(s.logs.some((l) => l.message.includes("pending") && l.message.includes("expired")));
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "sell"));
+  });
+
+  it("does not place on a rung that already has a foreign/leftover order", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -1533.8, entry: last };
+    const sell = upLevel(last, DEFAULT_FACTOR);
+    const leftover: GridOrder = {
+      id: "leftover",
+      side: "sell",
+      price: sell,
+      qty: 139.4,
+      notional: 100,
+      placedAt: 1,
+      mine: false,
+    };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: last },
+        positionNotional: 1100,
+        orders: [leftover],
+      }),
+    });
+    assert.equal(s.orders.filter((o) => o.side === "sell").length, 1);
+    assert.equal(s.orders.find((o) => o.side === "sell")?.id, "leftover");
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "leftover"));
   });
 
   it("when flat and armed with no fill, does not seed from mark", () => {

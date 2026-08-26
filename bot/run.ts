@@ -15,7 +15,6 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { sameRung } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 const execFileAsync = promisify(execFile);
@@ -248,27 +247,18 @@ async function refreshLive(book: Book) {
   const token = await ensureAuth();
   const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
   book.workingAll = all.map((o) => ({ id: o.id, notional: o.notional }));
-  const now = nowMs();
-  for (const o of all) {
-    if (isMine(book.owned, o)) continue;
-    if (book.giveUp.has(o.id)) continue;
-    const hitPending = book.engine.orders.some(
-      (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor),
-    );
-    if (hitPending) {
-      book.owned.ids.push({ id: o.id, at: now });
-      if (o.clientOrderIndex != null) book.owned.clients.push({ n: o.clientOrderIndex, at: now });
-    }
-  }
   adoptOrders(book, all);
-  const mine = all.filter((o) => !book.giveUp.has(o.id) && isMine(book.owned, o));
-  book.manuals = all.filter((o) => !isMine(book.owned, o));
+  const tagged = all.map((o) => ({
+    ...o,
+    mine: !book.giveUp.has(o.id) && isMine(book.owned, o),
+  }));
+  book.manuals = tagged.filter((o) => o.mine === false);
   const skipped = book.manuals.length;
   if (skipped !== book.lastManualSkip) {
     if (skipped > 0) log(`${book.market.symbol} leaving ${skipped} manual/unknown order(s) untouched`);
     book.lastManualSkip = skipped;
   }
-  book.live = { ...acc, orders: mine };
+  book.live = { ...acc, orders: tagged };
 }
 
 function applySharedMargin() {
@@ -288,8 +278,10 @@ let pythonSigner: "unknown" | "ok" | "missing" = "unknown";
 async function cancelViaPython(marketId: number, orderId: string): Promise<"ok" | "missing" | "fail"> {
   if (pythonSigner === "missing") return "missing";
   const script = path.resolve("bot/cancel_one.py");
+  const venvPy = path.resolve(".venv/bin/python");
+  const py = existsSync(venvPy) ? venvPy : "python3";
   try {
-    const { stdout, stderr } = await execFileAsync("python3", [script, String(marketId), String(orderId)], {
+    const { stdout, stderr } = await execFileAsync(py, [script, String(marketId), String(orderId)], {
       timeout: 30_000,
       env: process.env,
     });
@@ -305,7 +297,7 @@ async function cancelViaPython(marketId: number, orderId: string): Promise<"ok" 
     const msg = `${e.message ?? err}\n${e.stderr ?? ""}`;
     if (/No module named|ModuleNotFoundError/.test(msg)) {
       pythonSigner = "missing";
-      log("python lighter SDK missing — run: pip3 install --user git+https://github.com/elliottech/lighter-python.git");
+      log("python lighter SDK missing — run: python3 -m venv .venv && .venv/bin/pip install git+https://github.com/elliottech/lighter-python.git");
       return "missing";
     }
     log(`python cancel fail ${orderId} ${msg.trim()}`);

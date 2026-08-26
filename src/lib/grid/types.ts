@@ -21,6 +21,8 @@ export type GridOrder = {
   notional: number;
   placedAt: number;
   clientOrderIndex?: number;
+  /** false = someone else's / leftover; occupies the rung, never cancel */
+  mine?: boolean;
 };
 
 export type Position = {

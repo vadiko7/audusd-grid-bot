@@ -231,9 +231,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   const vanished = prev.filter((order) => {
     if (nextIds.has(order.id)) return false;
     if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;
-    if (order.id.startsWith("pending:")) {
-      return !liveOpen.some((o) => o.side === order.side && sameRung(o.price, order.price, state.factor));
-    }
+    if (order.id.startsWith("pending:")) return false;
     return true;
   });
   const eps = 1e-6;
@@ -284,9 +282,15 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   }
 
   const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id) && !filledIds.has(o.id));
-  const stillPending = pending.filter(
-    (p) => !liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor)),
-  );
+  const PENDING_MS = 12_000;
+  const stillPending = pending.filter((p) => {
+    if (liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor))) return false;
+    if (state.now - p.placedAt > PENDING_MS) {
+      pushLog(state, "warn", `pending ${p.side.toUpperCase()} ${p.price.toFixed(5)} expired — will re-place`);
+      return false;
+    }
+    return true;
+  });
 
   const wasNone = state.accountSource !== "live";
   state.accountSource = "live";
@@ -567,7 +571,7 @@ function walkCrossedLevels(state: EngineState): Fill | null {
   return fill;
 }
 
-function maintainPair(state: EngineState, why: string) {
+export function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);

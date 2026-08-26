@@ -5,6 +5,7 @@ import { parseMarkets, type MarketProfile } from "../src/lib/grid/markets.ts";
 import {
   createInitialState,
   flattenAtMark,
+  maintainPair,
   remainingCapacity,
   setArmed,
   setOrderNotional,
@@ -13,7 +14,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { stepsAway } from "../src/lib/grid/math.ts";
+import { sameRung, stepsAway } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
@@ -243,6 +244,17 @@ async function refreshLive(book: Book) {
   const token = await ensureAuth();
   const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
   book.workingAll = all.map((o) => ({ id: o.id, notional: o.notional }));
+  const now = nowMs();
+  for (const o of all) {
+    if (isMine(book.owned, o)) continue;
+    const hitPending = book.engine.orders.some(
+      (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor),
+    );
+    if (hitPending) {
+      book.owned.ids.push({ id: o.id, at: now });
+      if (o.clientOrderIndex != null) book.owned.clients.push({ n: o.clientOrderIndex, at: now });
+    }
+  }
   adoptOrders(book, all);
   const mine = all.filter((o) => isMine(book.owned, o));
   book.manuals = all.filter((o) => !isMine(book.owned, o));
@@ -359,8 +371,19 @@ function drainAndSend() {
           `${m.symbol} restore manual ${order.side} ${order.price.toFixed(m.priceDecimals)} × ${order.qty} ${placed.hash ?? ""}`,
         );
       }
+      for (const book of books) {
+        book.engine.orders = [];
+        book.engine.actions = [];
+        maintainPair(book.engine, "re-place ±1 after cancel-all");
+      }
+      const placeJobs = books
+        .map((b) => ({ book: b, actions: b.engine.actions.filter((a) => a.type === "place") }))
+        .filter((j) => j.actions.length);
+      for (const j of placeJobs) j.book.engine.actions = [];
+      for (const j of placeJobs) await executeActions(j.book, j.actions);
+    } else {
+      for (const j of jobs) await executeActions(j.book, j.actions);
     }
-    for (const j of jobs) await executeActions(j.book, j.actions);
     wantOrderPoll = true;
   })()
     .catch(async (err) => {

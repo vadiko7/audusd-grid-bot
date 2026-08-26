@@ -274,17 +274,24 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
   }
 
-  if (state.impulse === "buy" && side === "sell") {
+  if (state.impulse === "buy" && side === "buy") {
     return {
-      reason: `impulse BUY blocks sell (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
+      reason: `impulse BUY blocks buy — don't chase (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
       extra: { delta: state.impulseDeltaPct },
     };
   }
-  if (state.impulse === "sell" && side === "buy") {
+  if (state.impulse === "sell" && side === "sell") {
     return {
-      reason: `impulse SELL blocks buy (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
+      reason: `impulse SELL blocks sell — don't chase (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
       extra: { delta: state.impulseDeltaPct },
     };
+  }
+
+  if (state.orders.filter((o) => o.side === side).length >= 1) {
+    return { reason: `already have a ${side} (max 1 per side)` };
+  }
+  if (state.orders.length >= 2) {
+    return { reason: "max 2 working bot orders" };
   }
 
   if (isFlat(state) && side !== (state.config.market.prefer === "long" ? "buy" : "sell")) {
@@ -417,8 +424,7 @@ function cleanInvalid(state: EngineState) {
 
 function recenter(state: EngineState, reason: string) {
   cancelAll(state, reason);
-  state.lastFillPrice = state.mark;
-  state.lastFillSide = null;
+  pushLog(state, "clean", `${reason} — wait for a fill; will not seed ±1 from mark`);
 }
 
 function maintainPair(state: EngineState, why: string) {
@@ -461,11 +467,11 @@ function updateImpulse(state: EngineState, input: StepInput) {
   });
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
-      pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}%`);
+      pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — resume only current ±1`);
     } else if (resolved.impulse === "buy") {
-      pushLog(state, "impulse", `impulse BUY — BLOCK new sell limits (Δ ${resolved.deltaPct.toFixed(3)}%)`);
+      pushLog(state, "impulse", `impulse BUY — BLOCK new buys, don't chase (Δ ${resolved.deltaPct.toFixed(3)}%)`);
     } else {
-      pushLog(state, "impulse", `impulse SELL — BLOCK new buy limits (Δ ${resolved.deltaPct.toFixed(3)}%)`);
+      pushLog(state, "impulse", `impulse SELL — BLOCK new sells, don't chase (Δ ${resolved.deltaPct.toFixed(3)}%)`);
     }
   }
   state.impulse = resolved.impulse;
@@ -554,12 +560,13 @@ function runArmedCycle(state: EngineState) {
   const currentBias = bias(state);
   const anchor = fillAnchor(state);
   const steps = state.config.market.adverseSteps;
+  let waitFill = false;
   if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
     recenter(state, `adverse ≥ ${steps} steps against short`);
-    maintainPair(state, "re-place ±1 after adverse");
+    waitFill = true;
   } else if (anchor && currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor, steps)) {
     recenter(state, `adverse ≥ ${steps} steps against long`);
-    maintainPair(state, "re-place ±1 after adverse");
+    waitFill = true;
   } else if (anchor) {
     cleanInvalid(state);
   }
@@ -575,7 +582,7 @@ function runArmedCycle(state: EngineState) {
     for (const fill of state.fillsThisCycle) postFillMissed(state, fill);
   }
 
-  maintainPair(state, "maintain ±1");
+  if (!waitFill) maintainPair(state, "maintain ±1");
 }
 
 export function step(state: EngineState, input: StepInput): EngineState {

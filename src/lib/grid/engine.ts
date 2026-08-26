@@ -155,8 +155,8 @@ function inferLastFill(state: EngineState, orders: GridOrder[]): number | null {
   if (!(state.mark > 0)) return null;
   const nearest = [...live].sort((a, b) => Math.abs(a.price - state.mark) - Math.abs(b.price - state.mark))[0];
   const dist = stepsAway(state.mark, nearest.price, f);
-  if (dist < 0.3) return nearest.price;
-  if (Math.abs(dist - 1) < 0.35) {
+  if (dist < 0.65) return nearest.price;
+  if (Math.abs(dist - 1) < 0.45) {
     return nearest.side === "sell"
       ? downLevel(nearest.price, f, m.priceDecimals)
       : upLevel(nearest.price, f, m.priceDecimals);
@@ -251,7 +251,12 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   const prevSize = state.position.size;
   const nextSize = live.position.size;
   const posDelta = nextSize - prevSize;
-  state.unackedPosDelta += posDelta;
+  const firstLive = state.accountSource !== "live";
+  if (firstLive && Math.abs(prevSize) < 1e-6) {
+    state.unackedPosDelta = 0;
+  } else {
+    state.unackedPosDelta += posDelta;
+  }
   const vanished = prev.filter((order) => {
     if (nextIds.has(order.id)) return false;
     if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;

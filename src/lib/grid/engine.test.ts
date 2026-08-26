@@ -559,6 +559,64 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "place"));
   });
 
+  it("first live snapshot does not treat the open position as fills", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 2.9121;
+    const buy = downLevel(last, NATGAS.defaultFactor);
+    const sell = upLevel(last, NATGAS.defaultFactor);
+    s.config.market = NATGAS;
+    s.factor = NATGAS.defaultFactor;
+    s.spacingPct = NATGAS.defaultSpacingPct;
+    s.lastFillPrice = null;
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 2.8972,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 210.24, entry: 2.85 },
+        positionNotional: 608,
+        orders: [
+          { id: "b", side: "buy", price: buy, qty: 34.5, notional: 100, placedAt: 1, mine: true },
+          { id: "s", side: "sell", price: sell, qty: 34.5, notional: 100, placedAt: 1, mine: true },
+        ],
+      }),
+    });
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - last) < 0.002);
+    assert.ok(!s.actions.some((a) => a.type === "cancel"));
+    assert.ok(!s.actions.some((a) => a.type === "place"));
+    assert.equal(s.orders.filter((o) => o.side === "buy").length, 1);
+    assert.equal(s.orders.filter((o) => o.side === "sell").length, 1);
+  });
+
+  it("on-fill leftover infers lastFill and places real ±1, not the fill", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    s.config.market = NATGAS;
+    s.factor = NATGAS.defaultFactor;
+    s.spacingPct = NATGAS.defaultSpacingPct;
+    const fill = 2.9121;
+    s.lastFillPrice = null;
+    s.position = { size: 210.24, entry: 2.85 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 2.8842,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 210.24, entry: 2.85 },
+        positionNotional: 608,
+        orders: [{ id: "onfill", side: "sell", price: fill, qty: 34.5, notional: 100, placedAt: 1, mine: true }],
+      }),
+    });
+    const buy = downLevel(fill, NATGAS.defaultFactor);
+    const sell = upLevel(fill, NATGAS.defaultFactor);
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "onfill"));
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-4));
+    assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-4));
+    assert.ok(!places.some((a) => Math.abs(a.price - fill) < 1e-4));
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

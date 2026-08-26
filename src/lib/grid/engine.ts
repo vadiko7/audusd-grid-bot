@@ -392,33 +392,57 @@ function cancelAll(state: EngineState, reason: string) {
   pushLog(state, "clean", `clean ALL ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (other markets untouched)`);
 }
 
+function dropOrder(state: EngineState, order: GridOrder, why: string) {
+  if (state.cancelledIds.includes(order.id)) return;
+  state.cancelledIds.push(order.id);
+  emit(state, {
+    type: "cancel",
+    orderId: order.id,
+    side: order.side,
+    price: order.price,
+    why,
+  });
+  const m = state.config.market;
+  pushLog(
+    state,
+    "clean",
+    `clean ${order.side.toUpperCase()} ${order.price.toFixed(m.priceDecimals)} — ${why}`,
+  );
+}
+
 function cleanInvalid(state: EngineState) {
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);
   const prox = proximityPct(state.spacingPct, state.config.market);
+  const buys = state.orders.filter((o) => o.side === "buy");
+  const sells = state.orders.filter((o) => o.side === "sell");
+  const pickClosest = (orders: GridOrder[], target: number): GridOrder | null => {
+    let best: GridOrder | null = null;
+    let bestDist = Infinity;
+    for (const o of orders) {
+      if (!inProximity(o.price, target, prox)) continue;
+      const d = Math.abs(o.price - target);
+      if (d < bestDist) {
+        best = o;
+        bestDist = d;
+      }
+    }
+    return best;
+  };
+  const keepBuy = pickClosest(buys, levels.buy);
+  const keepSell = pickClosest(sells, levels.sell);
+  const keepIds = new Set([keepBuy?.id, keepSell?.id].filter(Boolean) as string[]);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
-    const belongs =
-      (order.side === "sell" && inProximity(order.price, levels.sell, prox)) ||
-      (order.side === "buy" && inProximity(order.price, levels.buy, prox));
-    if (belongs) keep.push(order);
-    else if (state.cancelledIds.includes(order.id)) {
-      /* already cancelling — do not emit another tx */
-    } else {
-      state.cancelledIds.push(order.id);
-      emit(state, {
-        type: "cancel",
-        orderId: order.id,
-        side: order.side,
-        price: order.price,
-        why: "not in ±1 set",
-      });
-      pushLog(
-        state,
-        "clean",
-        `clean ${order.side.toUpperCase()} ${order.price.toFixed(5)} — not in ±1 set (${levels.buy.toFixed(5)} / ${levels.sell.toFixed(5)})`,
-      );
+    if (keepIds.has(order.id)) {
+      keep.push(order);
+      continue;
     }
+    dropOrder(
+      state,
+      order,
+      `extra ${order.side} (only ±1: ${levels.buy.toFixed(state.config.market.priceDecimals)} / ${levels.sell.toFixed(state.config.market.priceDecimals)})`,
+    );
   }
   state.orders = keep;
 }

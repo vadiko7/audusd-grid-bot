@@ -379,7 +379,13 @@ function dedupRungs(state: EngineState, orders: GridOrder[]): GridOrder[] {
       keep.push(o);
       continue;
     }
-    if (keep[i].id.startsWith("pending:") && !o.id.startsWith("pending:")) keep[i] = o;
+    const cur = keep[i]!;
+    if (cur.id.startsWith("pending:") && !o.id.startsWith("pending:")) {
+      keep[i] = o;
+      continue;
+    }
+    if (o.id.startsWith("pending:")) continue;
+    keep.push(o);
   }
   return keep;
 }
@@ -615,39 +621,41 @@ function dropOrder(state: EngineState, order: GridOrder, why: string) {
 function cleanInvalid(state: EngineState) {
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);
-  const buys = state.orders.filter((o) => o.side === "buy");
-  const sells = state.orders.filter((o) => o.side === "sell");
-  const pickClosest = (orders: GridOrder[], target: number): GridOrder | null => {
-    let best: GridOrder | null = null;
-    let bestDist = Infinity;
-    for (const o of orders) {
-      if (!sameRung(o.price, target, state.factor)) continue;
-      const d = Math.abs(o.price - target);
-      if (d < bestDist) {
-        best = o;
-        bestDist = d;
-      }
-    }
-    return best;
-  };
-  const keepBuy = pickClosest(buys, levels.buy);
-  const keepSell = pickClosest(sells, levels.sell);
-  const keepIds = new Set([keepBuy?.id, keepSell?.id].filter(Boolean) as string[]);
+  const m = state.config.market;
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
-    if (!isMineOrder(order)) {
-      keep.push(order);
+    if (!isMineOrder(order)) keep.push(order);
+  }
+  const mine = state.orders.filter(isMineOrder);
+  const targetOf = (side: Side) => (side === "buy" ? levels.buy : levels.sell);
+  mine.sort((a, b) => Math.abs(a.price - targetOf(a.side)) - Math.abs(b.price - targetOf(b.side)));
+  const keptMine: Record<Side, boolean> = { buy: false, sell: false };
+  const rungTaken = (side: Side, price: number) =>
+    keep.some((k) => k.side === side && sameRung(k.price, price, state.factor));
+  for (const order of mine) {
+    if (rungTaken(order.side, order.price)) {
+      dropOrder(
+        state,
+        order,
+        `duplicate ${order.side} ${order.price.toFixed(m.priceDecimals)} — rung occupied`,
+      );
       continue;
     }
-    if (keepIds.has(order.id)) {
-      keep.push(order);
+    const tgt = targetOf(order.side);
+    if (!sameRung(order.price, tgt, state.factor)) {
+      dropOrder(
+        state,
+        order,
+        `extra ${order.side} (only ±1: ${levels.buy.toFixed(m.priceDecimals)} / ${levels.sell.toFixed(m.priceDecimals)})`,
+      );
       continue;
     }
-    dropOrder(
-      state,
-      order,
-      `extra ${order.side} (only ±1: ${levels.buy.toFixed(state.config.market.priceDecimals)} / ${levels.sell.toFixed(state.config.market.priceDecimals)})`,
-    );
+    if (keptMine[order.side]) {
+      dropOrder(state, order, `duplicate ${order.side} — already have ±1`);
+      continue;
+    }
+    keep.push(order);
+    keptMine[order.side] = true;
   }
   state.orders = keep;
 }

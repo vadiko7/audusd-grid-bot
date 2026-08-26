@@ -479,6 +479,37 @@ describe("engine cycle", () => {
     assert.ok(placed.some((p) => Math.abs(p - sell) < 1e-8));
   });
 
+  it("without lastFill does not use average entry — no clean, no place on fill", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.position = { size: -1533.8, entry: 0.72 };
+    s.lastFillPrice = null;
+    const onFill: GridOrder = {
+      id: "onfill",
+      side: "buy",
+      price: last,
+      qty: 139.4,
+      notional: 100,
+      placedAt: 1,
+      mine: true,
+    };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: 0.72 },
+        positionNotional: 1100,
+        orders: [onFill],
+      }),
+    });
+    assert.equal(s.lastFillPrice, null);
+    assert.ok(!s.actions.some((a) => a.type === "cancel"));
+    assert.ok(!s.actions.some((a) => a.type === "place"));
+    assert.equal(s.orders.find((o) => o.id === "onfill")?.id, "onfill");
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

@@ -136,7 +136,6 @@ export function bias(state: EngineState): "short" | "long" | "flat" {
 
 function fillAnchor(state: EngineState): number | null {
   if (state.lastFillPrice && state.lastFillPrice > 0) return state.lastFillPrice;
-  if (!isFlat(state) && state.position.entry > 0) return state.position.entry;
   return null;
 }
 

@@ -60,7 +60,13 @@ const OWNED_PATH = path.resolve("data/owned.json");
 
 const OWNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-type SavedSettings = { markets?: Record<string, { orderNotional?: number }>; orderNotional?: number };
+type SavedSettings = {
+  markets?: Record<
+    string,
+    { orderNotional?: number; lastFillPrice?: number; lastFillSide?: string; lastFillAt?: number }
+  >;
+  orderNotional?: number;
+};
 type Owned = {
   ids: Array<{ id: string; at: number }>;
   clients: Array<{ n: number; at: number }>;
@@ -159,11 +165,20 @@ function loadSettings(): SavedSettings {
   }
 }
 
-function saveSettings(symbol: string, orderNotional: number) {
+function saveSettings(book: {
+  market: { symbol: string };
+  engine: { config: { orderNotional: number }; lastFillPrice: number | null; lastFillSide: string | null; lastFillAt: number | null };
+}) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   const prev = loadSettings();
   const markets = { ...(prev.markets ?? {}) };
-  markets[symbol] = { orderNotional };
+  markets[book.market.symbol] = {
+    ...(markets[book.market.symbol] ?? {}),
+    orderNotional: book.engine.config.orderNotional,
+    lastFillPrice: book.engine.lastFillPrice ?? undefined,
+    lastFillSide: book.engine.lastFillSide ?? undefined,
+    lastFillAt: book.engine.lastFillAt ?? undefined,
+  };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
 
@@ -214,6 +229,14 @@ function makeBook(market: MarketProfile): Book {
     armed: false,
     orderNotional: n,
   });
+  const fillPx = Number(saved.markets?.[market.symbol]?.lastFillPrice);
+  if (Number.isFinite(fillPx) && fillPx > 0) {
+    engine.lastFillPrice = fillPx;
+    const side = saved.markets?.[market.symbol]?.lastFillSide;
+    if (side === "buy" || side === "sell") engine.lastFillSide = side;
+    const at = Number(saved.markets?.[market.symbol]?.lastFillAt);
+    if (Number.isFinite(at) && at > 0) engine.lastFillAt = at;
+  }
   const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
@@ -253,11 +276,8 @@ function isGridTicket(book: Book, order: { price: number; qty: number; notional:
     (expectedQty > 0 && Math.abs(order.qty - expectedQty) <= qtyTol) ||
     Math.abs(order.notional - n) <= notionalTol;
   if (!sizeOk) return false;
-  const a =
-    book.engine.lastFillPrice ||
-    (Math.abs(book.engine.position.size) > 1 ? book.engine.position.entry : 0) ||
-    book.mark;
-  if (!(a > 0)) return false;
+  const a = book.engine.lastFillPrice;
+  if (!(a && a > 0)) return false;
   const steps = stepsAway(a, order.price, book.engine.factor);
   const nearest = Math.round(steps);
   return nearest >= 0 && nearest <= 12 && Math.abs(steps - nearest) < 0.3;
@@ -421,6 +441,7 @@ async function tick() {
           mark: book.mark,
           live: book.live,
         });
+        if (book.engine.lastFillPrice) saveSettings(book);
       }
     }
     drainAndSend();
@@ -542,7 +563,7 @@ const server = http.createServer((req, res) => {
       return;
     }
     setOrderNotional(b.engine, usd);
-    saveSettings(b.market.symbol, b.engine.config.orderNotional);
+    saveSettings(b);
     drainAndSend();
     log(`http notional ${b.market.symbol} $${b.engine.config.orderNotional}`);
     res.writeHead(200, { "content-type": "application/json" });
@@ -592,6 +613,7 @@ async function main() {
           `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
+        if (book.engine.lastFillPrice) saveSettings(book);
       }
       lastAccount = Date.now();
       drainAndSend();

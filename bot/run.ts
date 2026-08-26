@@ -219,11 +219,11 @@ type Book = {
 };
 
 function makeBook(market: MarketProfile): Book {
-  const n =
+  const savedN =
     parseNotional(saved.markets?.[market.symbol]?.orderNotional) ??
     (market.symbol === "AUDUSD" ? parseNotional(saved.orderNotional) : null) ??
-    parseNotional(process.env[`ORDER_NOTIONAL_${market.symbol}`]) ??
-    market.orderNotional;
+    parseNotional(process.env[`ORDER_NOTIONAL_${market.symbol}`]);
+  const n = savedN && savedN !== 100 ? savedN : market.orderNotional;
   const engine = createInitialState({
     market,
     armed: false,

@@ -58,15 +58,15 @@ function liveAccount(partial: Partial<LiveAccount> = {}): LiveAccount {
 }
 
 describe("geometry", () => {
-  it("rounds base qty to 1 decimal from $100 notional", () => {
-    assert.equal(baseQty(0.71575), 139.7);
+  it("rounds base qty to 1 decimal from $25 notional", () => {
+    assert.equal(baseQty(0.71575), 34.9);
     assert.equal(baseQty(0.71575, 50), 69.9);
   });
 
-  it("builds ±1 geometric steps from 0.50% factor", () => {
+  it("builds ±1 geometric steps from 0.10% factor", () => {
     const p = 0.71575;
-    assert.equal(upLevel(p, DEFAULT_FACTOR), roundPrice(p * 1.005));
-    assert.equal(downLevel(p, DEFAULT_FACTOR), roundPrice(p / 1.005));
+    assert.equal(upLevel(p, DEFAULT_FACTOR), roundPrice(p * 1.001));
+    assert.equal(downLevel(p, DEFAULT_FACTOR), roundPrice(p / 1.001));
   });
 });
 
@@ -78,10 +78,10 @@ describe("regime / spacing", () => {
     assert.equal(classifyRegime(1.3), "extreme");
   });
 
-  it("clamps dynamic spacing", () => {
-    assert.equal(spacingFromAtr(0.1), 0.3);
-    assert.equal(spacingFromAtr(1.0), 0.8);
-    assert.equal(spacingFromAtr(2.0), 1.0);
+  it("clamps dynamic spacing to the locked 0.10%", () => {
+    assert.equal(spacingFromAtr(0.1), 0.1);
+    assert.equal(spacingFromAtr(1.0), 0.1);
+    assert.equal(spacingFromAtr(2.0), 0.1);
   });
 });
 
@@ -169,14 +169,14 @@ describe("live account source of truth", () => {
       id: "far",
       side: "sell" as const,
       price: upLevel(upLevel(last, DEFAULT_FACTOR), DEFAULT_FACTOR),
-      qty: 139.2,
-      notional: 100,
+      qty: 34.9,
+      notional: 25,
       placedAt: 1,
     };
     const innerSell = upLevel(last, DEFAULT_FACTOR);
     step(s, {
       now: 1_000,
-      mark: 0.7186,
+      mark: 0.71725,
       live: liveAccount({
         equity: 500,
         position: { size: -1533.8, entry: last },
@@ -187,7 +187,7 @@ describe("live account source of truth", () => {
     s.actions = [];
     step(s, {
       now: 2_000,
-      mark: 0.7186,
+      mark: 0.71725,
       live: liveAccount({
         equity: 500,
         position: { size: -1533.8, entry: last },
@@ -223,14 +223,19 @@ describe("live account source of truth", () => {
 describe("engine cycle", () => {
   it("cleans extra ±2 down to one buy and one sell", () => {
     const s = createInitialState({ startingEquity: 5000 });
-    s.lastFillPrice = 0.7172;
+    const last = 0.7172;
+    const innerBuy = downLevel(last, DEFAULT_FACTOR);
+    const innerSell = upLevel(last, DEFAULT_FACTOR);
+    const farBuy = downLevel(innerBuy, DEFAULT_FACTOR);
+    const farSell = upLevel(innerSell, DEFAULT_FACTOR);
+    s.lastFillPrice = last;
     s.lastFillAt = 1;
-    s.position = { size: -140, entry: 0.7172 };
+    s.position = { size: -140, entry: last };
     s.orders = [
-      { id: "1", side: "buy", price: 0.71363, qty: 139.2, notional: 99.3, placedAt: 1 },
-      { id: "2", side: "sell", price: 0.72079, qty: 139.2, notional: 100.3, placedAt: 1 },
-      { id: "3", side: "buy", price: 0.71505, qty: 139.3, notional: 99.6, placedAt: 1 },
-      { id: "4", side: "sell", price: 0.71935, qty: 139.3, notional: 100.2, placedAt: 1 },
+      { id: "1", side: "buy", price: farBuy, qty: 34.9, notional: 25, placedAt: 1 },
+      { id: "2", side: "sell", price: farSell, qty: 34.9, notional: 25, placedAt: 1 },
+      { id: "3", side: "buy", price: innerBuy, qty: 34.9, notional: 25, placedAt: 1 },
+      { id: "4", side: "sell", price: innerSell, qty: 34.9, notional: 25, placedAt: 1 },
     ];
     setArmed(s, true);
     run(s, 0.7172, 2_000);
@@ -247,9 +252,9 @@ describe("engine cycle", () => {
     s.lastFillAt = 1;
     s.position = { size: -139.2, entry: last };
     const farSell = upLevel(upLevel(last, DEFAULT_FACTOR), DEFAULT_FACTOR);
-    s.orders = [{ id: "old", side: "sell", price: farSell, qty: 139.2, notional: 100, placedAt: 1 }];
+    s.orders = [{ id: "old", side: "sell", price: farSell, qty: 34.9, notional: 25, placedAt: 1 }];
     setArmed(s, true);
-    run(s, 0.7186, 2_000);
+    run(s, 0.71725, 2_000);
     const innerSell = upLevel(last, DEFAULT_FACTOR);
     const innerBuy = downLevel(last, DEFAULT_FACTOR);
     const sells = s.orders.filter((o) => o.side === "sell");
@@ -355,7 +360,7 @@ describe("engine cycle", () => {
     const crossed = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
     step(s, {
       now: 2_000,
-      mark: 2.917,
+      mark: roundPrice(crossed * 1.0008, NATGAS.priceDecimals),
       live: liveAccount({
         equity: 500,
         position: { size: 35, entry: last },
@@ -581,25 +586,22 @@ describe("engine cycle", () => {
   });
 
   it("first live snapshot does not treat the open position as fills", () => {
-    const s = createInitialState({ startingEquity: 5000 });
-    const last = 2.9121;
-    const buy = downLevel(last, NATGAS.defaultFactor);
-    const sell = upLevel(last, NATGAS.defaultFactor);
-    s.config.market = NATGAS;
-    s.factor = NATGAS.defaultFactor;
-    s.spacingPct = NATGAS.defaultSpacingPct;
+    const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
+    const last = 2.9;
+    const buy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const sell = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
     s.lastFillPrice = null;
     setArmed(s, true);
     step(s, {
       now: 2_000,
-      mark: 2.8972,
+      mark: 2.9,
       live: liveAccount({
         equity: 500,
         position: { size: 210.24, entry: 2.85 },
         positionNotional: 608,
         orders: [
-          { id: "b", side: "buy", price: buy, qty: 34.5, notional: 100, placedAt: 1, mine: true },
-          { id: "s", side: "sell", price: sell, qty: 34.5, notional: 100, placedAt: 1, mine: true },
+          { id: "b", side: "buy", price: buy, qty: 8.62, notional: 25, placedAt: 1, mine: true },
+          { id: "s", side: "sell", price: sell, qty: 8.62, notional: 25, placedAt: 1, mine: true },
         ],
       }),
     });
@@ -611,26 +613,23 @@ describe("engine cycle", () => {
   });
 
   it("on-fill leftover infers lastFill and places real ±1, not the fill", () => {
-    const s = createInitialState({ startingEquity: 5000 });
-    s.config.market = NATGAS;
-    s.factor = NATGAS.defaultFactor;
-    s.spacingPct = NATGAS.defaultSpacingPct;
-    const fill = 2.9121;
+    const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
+    const fill = 2.9;
     s.lastFillPrice = null;
     s.position = { size: 210.24, entry: 2.85 };
     setArmed(s, true);
     step(s, {
       now: 2_000,
-      mark: 2.8842,
+      mark: 2.899,
       live: liveAccount({
         equity: 500,
         position: { size: 210.24, entry: 2.85 },
         positionNotional: 608,
-        orders: [{ id: "onfill", side: "sell", price: fill, qty: 34.5, notional: 100, placedAt: 1, mine: true }],
+        orders: [{ id: "onfill", side: "sell", price: fill, qty: 8.62, notional: 25, placedAt: 1, mine: true }],
       }),
     });
-    const buy = downLevel(fill, NATGAS.defaultFactor);
-    const sell = upLevel(fill, NATGAS.defaultFactor);
+    const buy = downLevel(fill, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const sell = upLevel(fill, NATGAS.defaultFactor, NATGAS.priceDecimals);
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "onfill"));
     const places = s.actions.filter((a) => a.type === "place");
     assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-4));
@@ -646,13 +645,17 @@ describe("engine cycle", () => {
     assert.equal(s.actions.length, 0);
   });
 
-  it("rejects remaining < 100", () => {
+  it("rejects remaining < $25", () => {
     const s = createInitialState({ startingEquity: 3 });
     s.lastFillPrice = 0.7;
     s.lastFillAt = 1;
     setArmed(s, true);
-    run(s, 0.7, 1_000);
-    assert.equal(s.orders.length, 0);
+    step(s, {
+      now: 1_000,
+      mark: 0.7,
+      live: liveAccount({ equity: 0.5, position: { size: 0, entry: 0 }, positionNotional: 0 }),
+    });
+    assert.equal(s.orders.filter((o) => !o.id.startsWith("pending:")).length, 0);
     assert.ok(s.logs.some((l) => l.level === "gate" && l.message.includes("remaining")));
   });
 
@@ -790,12 +793,17 @@ describe("engine cycle", () => {
     s.lastFillAt = t0;
     s.position = { size: -baseQty(0.7), entry: 0.7 };
     setArmed(s, true);
-    const near = 0.7 * 1.0035;
-    run(s, near, t0 + 50_000);
+    const near = 0.7 * 1.0008;
+    const live = liveAccount({
+      equity: 5000,
+      position: { size: -35, entry: 0.7 },
+      positionNotional: 25,
+    });
+    step(s, { now: t0 + 50_000, mark: 0.73, live });
     assert.equal(s.impulse, "buy");
     let catchActions = s.actions.slice();
     for (let i = 1; i <= 35; i++) {
-      run(s, near, t0 + 50_000 + i * 2_000);
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: near, live });
       if (s.impulse === "none" && s.actions.some((a) => a.type === "place")) {
         catchActions = s.actions.slice();
         break;

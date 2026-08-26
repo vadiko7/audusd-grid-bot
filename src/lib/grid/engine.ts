@@ -887,7 +887,7 @@ function runArmedCycle(state: EngineState) {
 
   if (state.fillsThisCycle.length === 0) {
     if (state.impulseJustCooled) impulseCoolCatch(state);
-    else if (state.accountSource === "live") {
+    else if (state.accountSource === "live" && state.impulse === "none") {
       const walked = walkCrossedLevels(state);
       if (walked) postFillMissed(state, walked);
     }

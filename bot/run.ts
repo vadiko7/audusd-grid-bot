@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import http from "node:http";
 import path from "node:path";
 import { parseMarkets, type MarketProfile } from "../src/lib/grid/markets.ts";
 import {
   createInitialState,
   flattenAtMark,
-  maintainPair,
   remainingCapacity,
   setArmed,
   setOrderNotional,
@@ -14,8 +15,10 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { downLevel, sameRung, stepsAway, upLevel } from "../src/lib/grid/math.ts";
-import { createAuthToken, dropSigner, refreshNonce, signCancelAllAccount, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+import { sameRung } from "../src/lib/grid/math.ts";
+import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+
+const execFileAsync = promisify(execFile);
 
 function loadDotEnv() {
   const candidates = [
@@ -280,11 +283,55 @@ function applySharedMargin() {
   }
 }
 
-let lastWipeAt = 0;
+let pythonSigner: "unknown" | "ok" | "missing" = "unknown";
+
+async function cancelViaPython(marketId: number, orderId: string): Promise<"ok" | "missing" | "fail"> {
+  if (pythonSigner === "missing") return "missing";
+  const script = path.resolve("bot/cancel_one.py");
+  try {
+    const { stdout, stderr } = await execFileAsync("python3", [script, String(marketId), String(orderId)], {
+      timeout: 30_000,
+      env: process.env,
+    });
+    const out = `${stdout}\n${stderr}`;
+    if (/\bok\b/.test(out)) {
+      pythonSigner = "ok";
+      return "ok";
+    }
+    log(`python cancel ${orderId} ${out.trim()}`);
+    return "fail";
+  } catch (err) {
+    const e = err as { message?: string; stderr?: string };
+    const msg = `${e.message ?? err}\n${e.stderr ?? ""}`;
+    if (/No module named|ModuleNotFoundError/.test(msg)) {
+      pythonSigner = "missing";
+      log("python lighter SDK missing — run: pip3 install --user git+https://github.com/elliottech/lighter-python.git");
+      return "missing";
+    }
+    log(`python cancel fail ${orderId} ${msg.trim()}`);
+    return "fail";
+  }
+}
 
 async function executeActions(book: Book, actions: EngineAction[]) {
   if (actions.length === 0) return;
   const m = book.market;
+  for (const action of actions) {
+    if (action.type !== "cancel") continue;
+    if (action.orderId.startsWith("pending:")) continue;
+    if (book.giveUp.has(action.orderId)) continue;
+    const result = await cancelViaPython(m.marketId, action.orderId);
+    if (result === "ok") {
+      log(`${m.symbol} tx cancel ${action.side} ${action.price.toFixed(m.priceDecimals)} ${action.orderId}`);
+      await new Promise((r) => setTimeout(r, 700));
+      continue;
+    }
+    if (result === "missing") continue;
+    book.giveUp.add(action.orderId);
+    book.owned.ids = book.owned.ids.filter((x) => x.id !== action.orderId);
+    saveOwned();
+    log(`${m.symbol} cancel failed ${action.orderId} — left as unknown, will not retry`);
+  }
   for (const action of actions) {
     if (action.type !== "place") continue;
     const clientOrderIndex = clientSeq++;
@@ -317,16 +364,6 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   }
 }
 
-function isGridTicket(book: Book, order: { price: number; notional: number }): boolean {
-  const a = book.engine.lastFillPrice || (Math.abs(book.engine.position.size) > 1 ? book.engine.position.entry : 0);
-  if (!(a > 0)) return false;
-  const n = book.engine.config.orderNotional;
-  if (!(order.notional >= 10 && order.notional <= n * 1.6)) return false;
-  const steps = stepsAway(a, order.price, book.engine.factor);
-  const nearest = Math.round(steps);
-  return nearest >= 0 && nearest <= 12 && Math.abs(steps - nearest) < 0.3;
-}
-
 function drainAndSend() {
   if (busy) return;
   const jobs = books
@@ -336,55 +373,7 @@ function drainAndSend() {
   for (const j of jobs) j.book.engine.actions = [];
   busy = true;
   (async () => {
-    const drop = jobs.flatMap((j) =>
-      j.actions.filter((a) => a.type === "cancel" && !a.orderId.startsWith("pending:")),
-    );
-    if (drop.length && Date.now() - lastWipeAt > 45_000) {
-      lastWipeAt = Date.now();
-      const manuals = books.flatMap((b) =>
-        b.manuals
-          .filter((o) => {
-            if (b.giveUp.has(o.id)) return false;
-            if (isGridTicket(b, o)) return false;
-            return true;
-          })
-          .map((o) => ({ book: b, order: o })),
-      );
-      const signed = await signCancelAllAccount(creds);
-      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-      lastTx = res.hash || lastTx;
-      await refreshNonce(creds);
-      log(`tx cancel-all (extras only; restore ${manuals.length} manual, re-place ±1) ${res.hash ?? ""}`);
-      for (const { book, order } of manuals) {
-        const m = book.market;
-        const clientOrderIndex = clientSeq++;
-        const placed = await sendTx({
-          ...(await signCreateLimit(creds, {
-            marketIndex: m.marketId,
-            clientOrderIndex,
-            baseAmount: Math.round(order.qty * 10 ** m.sizeDecimals),
-            price: Math.round(order.price * 10 ** m.priceDecimals),
-            isAsk: order.side === "sell",
-          })),
-          accountIndex: creds.accountIndex,
-          apiKeyIndex: creds.apiKeyIndex,
-        });
-        lastTx = placed.hash || lastTx;
-        log(`${m.symbol} restore manual ${order.side} ${order.price.toFixed(m.priceDecimals)} × ${order.qty}`);
-      }
-      for (const book of books) {
-        book.engine.orders = [];
-        book.engine.actions = [];
-        maintainPair(book.engine, "re-place ±1 after extra clean");
-      }
-      const placeJobs = books
-        .map((b) => ({ book: b, actions: b.engine.actions.filter((a) => a.type === "place") }))
-        .filter((j) => j.actions.length);
-      for (const j of placeJobs) j.book.engine.actions = [];
-      for (const j of placeJobs) await executeActions(j.book, j.actions);
-    } else {
-      for (const j of jobs) await executeActions(j.book, j.actions.filter((a) => a.type !== "cancel"));
-    }
+    for (const j of jobs) await executeActions(j.book, j.actions);
     wantOrderPoll = true;
   })()
     .catch(async (err) => {

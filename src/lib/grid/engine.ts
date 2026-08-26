@@ -593,10 +593,11 @@ function impulseCoolCatch(state: EngineState): void {
   const prox = proximityPct(state.spacingPct, m);
   const far = distPct > prox;
   if (!far) {
+    cleanInvalid(state);
     pushLog(
       state,
       "impulse",
-      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% (2× spacing) — limit ±1 only`,
+      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% (2× spacing) — clean leftover bot limits, ±1 only`,
     );
     return;
   }

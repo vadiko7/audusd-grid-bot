@@ -13,7 +13,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { createAuthToken, dropSigner, signCancelOrder, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+import { createAuthToken, dropSigner, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
   const candidates = [
@@ -278,66 +278,42 @@ function applySharedMargin() {
 async function executeActions(book: Book, actions: EngineAction[]) {
   if (actions.length === 0) return;
   const m = book.market;
-  const seenCancel = new Set<string>();
-  const hasCancelAll = actions.some((a) => a.type === "cancel_all");
-  const cancelIds = hasCancelAll
-    ? [...new Set(book.engine.cancelledIds.filter((id) => !id.startsWith("pending:")))]
-    : [];
-  for (const action of actions) {
-    if (action.type === "place") {
-      const clientOrderIndex = clientSeq++;
-      const exec = action.exec === "market" ? "market" : "limit";
-      const signed =
-        exec === "market"
-          ? await signCreateMarket(creds, {
-              marketIndex: m.marketId,
-              clientOrderIndex,
-              baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
-              avgExecutionPrice: Math.round(action.price * 10 ** m.priceDecimals),
-              isAsk: action.side === "sell",
-              reduceOnly: action.reduceOnly,
-            })
-          : await signCreateLimit(creds, {
-              marketIndex: m.marketId,
-              clientOrderIndex,
-              baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
-              price: Math.round(action.price * 10 ** m.priceDecimals),
-              isAsk: action.side === "sell",
-              reduceOnly: action.reduceOnly,
-            });
-      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-      lastTx = res.hash || lastTx;
-      if (!book.owned.clients.some((x) => x.n === clientOrderIndex)) {
-        book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
-      }
-      saveOwned();
-      log(`${m.symbol} tx ${exec} ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
-    } else if (action.type === "cancel") {
-      if (hasCancelAll) continue;
-      if (seenCancel.has(action.orderId)) continue;
-      if (!book.owned.ids.some((x) => x.id === action.orderId)) {
-        log(`${m.symbol} skip cancel ${action.orderId} (not bot-owned)`);
-        continue;
-      }
-      seenCancel.add(action.orderId);
-      if (!/^\d+$/.test(action.orderId)) continue;
-      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: action.orderId });
-      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-      lastTx = res.hash || lastTx;
-      log(`${m.symbol} tx cancel ${action.orderId} ${res.hash ?? ""}`);
-    }
+  const needsCancel = actions.some((a) => a.type === "cancel" || a.type === "cancel_all");
+  if (needsCancel) {
+    const signed = await signCancelMarket(creds, m.marketId);
+    const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
+    lastTx = res.hash || lastTx;
+    log(`${m.symbol} tx cancel-all market ${m.marketId} ${res.hash ?? ""}`);
   }
-  if (hasCancelAll) {
-    for (const id of cancelIds) {
-      if (seenCancel.has(id)) continue;
-      if (!book.owned.ids.some((x) => x.id === id)) continue;
-      seenCancel.add(id);
-      if (!/^\d+$/.test(id)) continue;
-      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: id });
-      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-      lastTx = res.hash || lastTx;
-      log(`${m.symbol} tx cancel ${id} ${res.hash ?? ""}`);
+  for (const action of actions) {
+    if (action.type !== "place") continue;
+    const clientOrderIndex = clientSeq++;
+    const exec = action.exec === "market" ? "market" : "limit";
+    const signed =
+      exec === "market"
+        ? await signCreateMarket(creds, {
+            marketIndex: m.marketId,
+            clientOrderIndex,
+            baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
+            avgExecutionPrice: Math.round(action.price * 10 ** m.priceDecimals),
+            isAsk: action.side === "sell",
+            reduceOnly: action.reduceOnly,
+          })
+        : await signCreateLimit(creds, {
+            marketIndex: m.marketId,
+            clientOrderIndex,
+            baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
+            price: Math.round(action.price * 10 ** m.priceDecimals),
+            isAsk: action.side === "sell",
+            reduceOnly: action.reduceOnly,
+          });
+    const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
+    lastTx = res.hash || lastTx;
+    if (!book.owned.clients.some((x) => x.n === clientOrderIndex)) {
+      book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
     }
+    saveOwned();
+    log(`${m.symbol} tx ${exec} ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
   }
 }
 

@@ -134,20 +134,34 @@ export async function signCreateMarket(
   );
 }
 
+export async function signCancelMarket(creds: LighterCreds, marketIndex: number): Promise<SignedTx> {
+  const client = await getClient(creds);
+  const api = (client as unknown as { transactionApi: { getNextNonce: (a: number, k: number) => Promise<{ nonce: number }> } })
+    .transactionApi;
+  const { nonce } = await api.getNextNonce(creds.accountIndex, creds.apiKeyIndex);
+  const fn = (globalThis as unknown as {
+    SignCancelAllOrders?: (
+      tif: number,
+      time: number,
+      marketIndex: number,
+      skipNonce: number,
+      nonce: number,
+      apiKeyIndex: number,
+      accountIndex: number,
+    ) => { error?: string; txType?: number; txInfo?: string };
+  }).SignCancelAllOrders;
+  if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
+  const result = fn(0, Date.now(), marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  if (result?.error) throw new Error(result.error);
+  if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
+  return { txType: Number(result.txType ?? 16), txInfo: String(result.txInfo) };
+}
+
 export async function signCancelOrder(
   creds: LighterCreds,
-  params: { marketIndex: number; orderIndex: string | number | bigint },
+  params: { marketIndex: number; orderIndex: string | number },
 ): Promise<SignedTx> {
-  const client = await getClient(creds);
-  const orderIndex =
-    typeof params.orderIndex === "bigint"
-      ? params.orderIndex
-      : typeof params.orderIndex === "string" && /^\d+$/.test(params.orderIndex)
-        ? BigInt(params.orderIndex)
-        : params.orderIndex;
-  return captureSign(client, () =>
-    client.cancelOrder({ marketIndex: params.marketIndex, orderIndex: orderIndex as unknown as number }),
-  );
+  return signCancelMarket(creds, params.marketIndex);
 }
 
 export async function signCancelAll(creds: LighterCreds): Promise<SignedTx> {

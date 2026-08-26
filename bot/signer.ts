@@ -136,10 +136,18 @@ export async function signCreateMarket(
 
 export async function signCancelOrder(
   creds: LighterCreds,
-  params: { marketIndex: number; orderIndex: number },
+  params: { marketIndex: number; orderIndex: string | number | bigint },
 ): Promise<SignedTx> {
   const client = await getClient(creds);
-  return captureSign(client, () => client.cancelOrder(params));
+  const orderIndex =
+    typeof params.orderIndex === "bigint"
+      ? params.orderIndex
+      : typeof params.orderIndex === "string" && /^\d+$/.test(params.orderIndex)
+        ? BigInt(params.orderIndex)
+        : params.orderIndex;
+  return captureSign(client, () =>
+    client.cancelOrder({ marketIndex: params.marketIndex, orderIndex: orderIndex as unknown as number }),
+  );
 }
 
 export async function signCancelAll(creds: LighterCreds): Promise<SignedTx> {

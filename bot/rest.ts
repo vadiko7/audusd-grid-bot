@@ -128,9 +128,17 @@ async function request(
   throw new Error(`Lighter curl ${res.status} ${path} ${hint}`);
 }
 
+function parseLighterJson<T>(body: string): T {
+  const quoted = body.replace(
+    /"(order_index|order_id|client_order_index|client_order_id)"\s*:\s*(-?\d+)/g,
+    (_, k, n) => (`"${k}":"${n}"`),
+  );
+  return JSON.parse(quoted) as T;
+}
+
 async function lighterGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
   const res = await request("GET", path, headers);
-  return JSON.parse(res.body) as T;
+  return parseLighterJson<T>(res.body);
 }
 
 function leverageOf(marketId: number): number {

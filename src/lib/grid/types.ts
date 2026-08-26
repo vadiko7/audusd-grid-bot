@@ -120,6 +120,7 @@ export type EngineState = {
   cancelledIds: string[];
   impulseJustCooled: boolean;
   foreignMargin: number;
+  cancelSentAt: Record<string, number>;
 };
 
 export type StepInput = {

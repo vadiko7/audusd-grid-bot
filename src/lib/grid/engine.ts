@@ -94,6 +94,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     cancelledIds: [],
     impulseJustCooled: false,
     foreignMargin: 0,
+    cancelSentAt: {},
   };
 }
 
@@ -207,13 +208,28 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.foreignMargin = Number.isFinite(live.foreignMargin) ? Math.max(0, live.foreignMargin) : 0;
   const prev = state.orders;
   const cancelled = new Set(state.cancelledIds);
-  const liveOpen = live.orders.filter((o) => !cancelled.has(o.id));
+  const RETRY_MS = 8_000;
+  const stillCancelled = new Set<string>();
+  for (const id of cancelled) {
+    const stillLive = live.orders.some((o) => o.id === id);
+    if (!stillLive) continue;
+    const sent = state.cancelSentAt[id] ?? 0;
+    if (sent && state.now - sent < RETRY_MS) stillCancelled.add(id);
+    else {
+      pushLog(state, "warn", `cancel ${id} still on DEX — retry`);
+      delete state.cancelSentAt[id];
+    }
+  }
+  const liveOpen = live.orders;
   const nextIds = new Set(liveOpen.map((o) => o.id));
 
   for (const order of prev) {
     if (order.id.startsWith("pending:")) continue;
-    if (cancelled.has(order.id)) continue;
     if (nextIds.has(order.id)) continue;
+    if (cancelled.has(order.id) || state.cancelSentAt[order.id]) {
+      delete state.cancelSentAt[order.id];
+      continue;
+    }
     const fill: Fill = {
       orderId: order.id,
       side: order.side,
@@ -244,7 +260,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.realizedPnl = live.realizedPnl;
   state.unrealizedPnl = live.unrealizedPnl;
   state.orders = [...liveOpen, ...stillPending];
-  state.cancelledIds = [...cancelled].filter((id) => live.orders.some((o) => o.id === id) || id.startsWith("pending:"));
+  state.cancelledIds = [...stillCancelled];
   if (wasNone) {
     pushLog(state, "info", `live account ${live.accountIndex} · equity $${live.equity.toFixed(2)}`);
   }
@@ -252,6 +268,10 @@ function ingestLive(state: EngineState, live: LiveAccount) {
 
 function emit(state: EngineState, action: EngineAction) {
   state.actions = [...state.actions, action];
+  if (action.type === "cancel") state.cancelSentAt[action.orderId] = state.now;
+  if (action.type === "cancel_all") {
+    for (const o of state.orders) state.cancelSentAt[o.id] = state.now;
+  }
 }
 
 function hasNear(state: EngineState, target: number): boolean {

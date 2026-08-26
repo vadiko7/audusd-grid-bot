@@ -320,9 +320,8 @@ async function executeActions(book: Book, actions: EngineAction[]) {
         continue;
       }
       seenCancel.add(action.orderId);
-      const idx = Number(action.orderId);
-      if (!Number.isFinite(idx)) continue;
-      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: idx });
+      if (!/^\d+$/.test(action.orderId)) continue;
+      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: action.orderId });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
       log(`${m.symbol} tx cancel ${action.orderId} ${res.hash ?? ""}`);
@@ -333,9 +332,8 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       if (seenCancel.has(id)) continue;
       if (!book.owned.ids.some((x) => x.id === id)) continue;
       seenCancel.add(id);
-      const idx = Number(id);
-      if (!Number.isFinite(idx)) continue;
-      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: idx });
+      if (!/^\d+$/.test(id)) continue;
+      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: id });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
       log(`${m.symbol} tx cancel ${id} ${res.hash ?? ""}`);

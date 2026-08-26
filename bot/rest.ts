@@ -348,7 +348,14 @@ export async function fetchCandles(
   return json.c ?? [];
 }
 
-export async function sendTx(tx: {
+export async function fetchNextNonce(accountIndex: number, apiKeyIndex: number): Promise<number> {
+  const json = await lighterGet<{ nonce?: number | string; code?: number; message?: string }>(
+    `/api/v1/nextNonce?account_index=${accountIndex}&api_key_index=${apiKeyIndex}`,
+  );
+  const n = Number(json.nonce);
+  if (!Number.isFinite(n)) throw new Error(`nextNonce ${json.message ?? JSON.stringify(json)}`);
+  return n;
+}
   txType: number;
   txInfo: string;
   accountIndex: number;

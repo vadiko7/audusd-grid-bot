@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fetchNextNonce } from "./rest.ts";
 import { SignerClient } from "@specialjp/lighter-sdk";
 import { LIGHTER_REST } from "../src/lib/grid/constants.ts";
 
@@ -136,6 +137,7 @@ export async function signCreateMarket(
 
 export async function signCancelMarket(creds: LighterCreds, marketIndex: number): Promise<SignedTx> {
   await getClient(creds);
+  const nonce = await fetchNextNonce(creds.accountIndex, creds.apiKeyIndex);
   const fn = (globalThis as unknown as {
     SignCancelAllOrders?: (
       tif: number,
@@ -148,10 +150,21 @@ export async function signCancelMarket(creds: LighterCreds, marketIndex: number)
     ) => { error?: string; txType?: number; txInfo?: string };
   }).SignCancelAllOrders;
   if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
-  const result = fn(0, 0, marketIndex, 0, -1, creds.apiKeyIndex, creds.accountIndex);
+  const result = fn(0, 0, marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
   if (result?.error) throw new Error(result.error);
   if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
-  return { txType: Number(result.txType ?? 16), txInfo: String(result.txInfo) };
+  const txType = Number(result.txType) || 16;
+  let signedNonce: string | number = "?";
+  try {
+    const parsed = JSON.parse(result.txInfo) as { Nonce?: number; nonce?: number };
+    signedNonce = parsed.Nonce ?? parsed.nonce ?? "?";
+  } catch {
+    /* ignore */
+  }
+  process.stdout.write(
+    `${new Date().toISOString()} cancel-all m${marketIndex} apiNonce ${nonce} txNonce ${signedNonce} txType ${txType}\n`,
+  );
+  return { txType, txInfo: String(result.txInfo) };
 }
 
 export async function refreshNonce(creds: LighterCreds): Promise<void> {

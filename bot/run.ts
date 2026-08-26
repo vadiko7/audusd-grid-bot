@@ -278,14 +278,6 @@ function applySharedMargin() {
 async function executeActions(book: Book, actions: EngineAction[]) {
   if (actions.length === 0) return;
   const m = book.market;
-  const needsCancel = actions.some((a) => a.type === "cancel" || a.type === "cancel_all");
-  if (needsCancel) {
-    const signed = await signCancelMarket(creds, m.marketId);
-    const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-    lastTx = res.hash || lastTx;
-    await refreshNonce(creds);
-    log(`${m.symbol} tx cancel-all market ${m.marketId} ${res.hash ?? ""}`);
-  }
   for (const action of actions) {
     if (action.type !== "place") continue;
     const clientOrderIndex = clientSeq++;
@@ -327,6 +319,14 @@ function drainAndSend() {
   for (const j of jobs) j.book.engine.actions = [];
   busy = true;
   (async () => {
+    const anyCancel = jobs.some((j) => j.actions.some((a) => a.type === "cancel" || a.type === "cancel_all"));
+    if (anyCancel) {
+      const signed = await signCancelMarket(creds, 0);
+      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
+      lastTx = res.hash || lastTx;
+      await refreshNonce(creds);
+      log(`tx cancel-all account ${res.hash ?? ""}`);
+    }
     for (const j of jobs) await executeActions(j.book, j.actions);
   })()
     .catch(async (err) => {

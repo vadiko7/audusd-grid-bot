@@ -142,15 +142,13 @@ export async function signCancelMarket(creds: LighterCreds, marketIndex: number)
     SignCancelAllOrders?: (
       tif: number,
       time: number,
-      marketIndex: number,
-      skipNonce: number,
       nonce: number,
       apiKeyIndex: number,
       accountIndex: number,
     ) => { error?: string; txType?: number; txInfo?: string };
   }).SignCancelAllOrders;
   if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
-  const result = fn(0, 0, marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  const result = fn(0, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
   if (result?.error) throw new Error(result.error);
   if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
   const txType = Number(result.txType) || 16;
@@ -162,7 +160,7 @@ export async function signCancelMarket(creds: LighterCreds, marketIndex: number)
     /* ignore */
   }
   process.stdout.write(
-    `${new Date().toISOString()} cancel-all m${marketIndex} apiNonce ${nonce} txNonce ${signedNonce} txType ${txType}\n`,
+    `${new Date().toISOString()} cancel-all apiNonce ${nonce} txNonce ${signedNonce} txType ${txType}\n`,
   );
   return { txType, txInfo: String(result.txInfo) };
 }

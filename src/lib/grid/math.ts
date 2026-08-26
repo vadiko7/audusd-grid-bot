@@ -40,6 +40,11 @@ export function inProximity(price: number, target: number, proxPct: number): boo
   return Math.abs(price - target) / target <= proxPct / 100;
 }
 
+export function sameRung(price: number, target: number, factor: number): boolean {
+  if (target <= 0 || price <= 0 || factor <= 1) return false;
+  return stepsAway(price, target, factor) < 0.5;
+}
+
 export function stepsAway(from: number, to: number, factor: number): number {
   if (from <= 0 || to <= 0 || factor <= 1) return 0;
   return Math.abs(Math.log(to / from) / Math.log(factor));

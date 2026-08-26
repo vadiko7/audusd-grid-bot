@@ -239,6 +239,27 @@ describe("engine cycle", () => {
     assert.ok(s.actions.filter((a) => a.type === "cancel" || a.type === "cancel_all").length >= 2);
   });
 
+  it("after a fill, leftover ±2 does not block opposite ±1 and is cleaned", () => {
+    const s = createInitialState({ startingEquity: 2000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -139.2, entry: last };
+    const farSell = upLevel(upLevel(last, DEFAULT_FACTOR), DEFAULT_FACTOR);
+    s.orders = [{ id: "old", side: "sell", price: farSell, qty: 139.2, notional: 100, placedAt: 1 }];
+    setArmed(s, true);
+    run(s, 0.7186, 2_000);
+    const innerSell = upLevel(last, DEFAULT_FACTOR);
+    const innerBuy = downLevel(last, DEFAULT_FACTOR);
+    const sells = s.orders.filter((o) => o.side === "sell");
+    const buys = s.orders.filter((o) => o.side === "buy");
+    assert.equal(sells.length, 1);
+    assert.ok(Math.abs(sells[0].price - innerSell) < 1e-8);
+    assert.equal(buys.length, 1);
+    assert.ok(Math.abs(buys[0].price - innerBuy) < 1e-8);
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

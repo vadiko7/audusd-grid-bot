@@ -18,6 +18,7 @@ import {
   proximityPct,
   roundPrice,
   roundQty,
+  sameRung,
   signedSize,
   stepsAway,
   upLevel,
@@ -294,8 +295,9 @@ function emit(state: EngineState, action: EngineAction) {
 }
 
 function hasNear(state: EngineState, target: number, side?: Side): boolean {
-  const prox = proximityPct(state.spacingPct, state.config.market);
-  return state.orders.some((o) => (!side || o.side === side) && inProximity(o.price, target, prox));
+  return state.orders.some(
+    (o) => (!side || o.side === side) && sameRung(o.price, target, state.factor),
+  );
 }
 
 type GateFail = { reason: string; extra?: Record<string, string | number | boolean> };
@@ -452,14 +454,13 @@ function dropOrder(state: EngineState, order: GridOrder, why: string) {
 function cleanInvalid(state: EngineState) {
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);
-  const prox = proximityPct(state.spacingPct, state.config.market);
   const buys = state.orders.filter((o) => o.side === "buy");
   const sells = state.orders.filter((o) => o.side === "sell");
   const pickClosest = (orders: GridOrder[], target: number): GridOrder | null => {
     let best: GridOrder | null = null;
     let bestDist = Infinity;
     for (const o of orders) {
-      if (!inProximity(o.price, target, prox)) continue;
+      if (!sameRung(o.price, target, state.factor)) continue;
       const d = Math.abs(o.price - target);
       if (d < bestDist) {
         best = o;
@@ -503,10 +504,9 @@ function postFillMissed(state: EngineState, fill: Fill) {
   const m = state.config.market;
   const up = upLevel(fill.price, state.factor, m.priceDecimals);
   const down = downLevel(fill.price, state.factor, m.priceDecimals);
-  const prox = proximityPct(state.spacingPct, m);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
-    const belongs = inProximity(order.price, up, prox) || inProximity(order.price, down, prox);
+    const belongs = sameRung(order.price, up, state.factor) || sameRung(order.price, down, state.factor);
     if (belongs) keep.push(order);
     else if (!state.cancelledIds.includes(order.id)) {
       state.cancelledIds.push(order.id);

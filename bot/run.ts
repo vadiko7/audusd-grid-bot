@@ -13,6 +13,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
+import { stepsAway } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
@@ -242,19 +243,6 @@ async function refreshLive(book: Book) {
   const token = await ensureAuth();
   const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
   book.workingAll = all.map((o) => ({ id: o.id, notional: o.notional }));
-  const n = book.engine.config.orderNotional;
-  let adopted = 0;
-  for (const o of all) {
-    if (isMine(book.owned, o)) continue;
-    if (o.notional >= 10 && o.notional <= n * 1.6) {
-      book.owned.ids.push({ id: o.id, at: nowMs() });
-      adopted += 1;
-    }
-  }
-  if (adopted) {
-    saveOwned();
-    log(`${book.market.symbol} adopted ${adopted} leftover grid order(s) to clean to ±1`);
-  }
   adoptOrders(book, all);
   const mine = all.filter((o) => isMine(book.owned, o));
   book.manuals = all.filter((o) => !isMine(book.owned, o));
@@ -325,7 +313,19 @@ function drainAndSend() {
     const anyCancel = jobs.some((j) => j.actions.some((a) => a.type === "cancel" || a.type === "cancel_all"));
     if (anyCancel) {
       const manuals = books.flatMap((b) =>
-        b.manuals.map((o) => ({ book: b, order: o })),
+        b.manuals
+          .filter((o) => {
+            const n = b.engine.config.orderNotional;
+            if (o.notional >= 10 && o.notional <= n * 1.6) {
+              const a = b.engine.lastFillPrice || b.engine.position.entry;
+              if (!(a > 0)) return false;
+              const steps = stepsAway(a, o.price, b.engine.factor);
+              const nearest = Math.round(steps);
+              if (nearest >= 1 && nearest <= 12 && Math.abs(steps - nearest) < 0.3) return false;
+            }
+            return true;
+          })
+          .map((o) => ({ book: b, order: o })),
       );
       const now = Date.now();
       for (const book of books) {

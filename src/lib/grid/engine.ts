@@ -311,7 +311,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   }
 
   const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id) && !filledIds.has(o.id));
-  const PENDING_MS = 12_000;
+  const PENDING_MS = 45_000;
   const stillPending = pending.filter((p) => {
     if (liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor))) return false;
     if (state.now - p.placedAt > PENDING_MS) {
@@ -639,6 +639,12 @@ export function maintainPair(state: EngineState, why: string) {
     return;
   }
   const levels = validLevels(state);
+  const m = state.config.market;
+  pushLog(
+    state,
+    "info",
+    `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} $/lvl ${state.config.orderNotional}`,
+  );
   if (!hasNear(state, levels.sell, "sell")) placeLimit(state, "sell", levels.sell, why);
   if (!isFlat(state) && !hasNear(state, levels.buy, "buy")) placeLimit(state, "buy", levels.buy, why);
 }

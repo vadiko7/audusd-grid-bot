@@ -14,6 +14,7 @@ import {
   step,
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
+import { sameRung } from "../src/lib/grid/math.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
@@ -148,9 +149,8 @@ function adoptOrders(book: { owned: Owned; market: { symbol: string } }, liveOrd
     }
     if (ids.has(o.id)) ids.set(o.id, now);
   }
-  const liveIds = new Set(liveOrders.map((o) => o.id));
   book.owned = pruneOwned({
-    ids: [...ids.entries()].filter(([id]) => liveIds.has(id)).map(([id, at]) => ({ id, at })),
+    ids: [...ids.entries()].map(([id, at]) => ({ id, at })),
     clients: [...clients.entries()].map(([n, at]) => ({ n, at })),
   }, now);
   saveOwned();
@@ -272,6 +272,17 @@ async function refreshLive(book: Book) {
   const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
   book.workingAll = all.map((o) => ({ id: o.id, notional: o.notional }));
   adoptOrders(book, all);
+  const pending = book.engine.orders.filter((o) => o.id.startsWith("pending:"));
+  const now = nowMs();
+  for (const o of all) {
+    const hit = pending.some(
+      (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor),
+    );
+    if (hit && !book.owned.ids.some((x) => x.id === o.id)) {
+      book.owned.ids.push({ id: o.id, at: now });
+    }
+  }
+  saveOwned();
   const mine = all
     .filter((o) => isMine(book.owned, o))
     .map((o) => ({ ...o, mine: true as const }));
@@ -608,8 +619,14 @@ async function main() {
         );
         if (WANT_ARM) setArmed(book.engine, true);
         if (book.engine.lastFillPrice) saveSettings(book);
-        for (const l of book.engine.logs.slice(-6)) {
-          if (l.level === "gate" || l.level === "place" || l.message.includes("lastFill") || l.message.includes("armed")) {
+        for (const l of book.engine.logs.slice(-8)) {
+          if (
+            l.level === "gate" ||
+            l.level === "place" ||
+            l.message.includes("lastFill") ||
+            l.message.includes("armed") ||
+            l.message.includes("±1")
+          ) {
             log(`${book.market.symbol} ${l.message}`);
           }
         }

@@ -404,7 +404,7 @@ describe("engine cycle", () => {
     assert.ok(!s.logs.some((l) => l.message.includes("order gone")));
     assert.ok(s.orders.some((o) => o.side === "sell" && o.id.startsWith("pending:")));
     step(s, {
-      now: 20_000,
+      now: 50_000,
       mark: 0.71729,
       live: liveAccount({
         equity: 500,

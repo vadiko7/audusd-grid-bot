@@ -339,6 +339,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       await new Promise((r) => setTimeout(r, 700));
       continue;
     }
+    if (result === "missing") continue;
     log(`${m.symbol} cancel leftover ${action.orderId} ${result} — will retry`);
   }
   for (const action of actions) {
@@ -567,6 +568,11 @@ async function main() {
   log(
     `bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} markets=${books.map((b) => b.market.symbol).join(",")} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`,
   );
+  if (!existsSync(path.resolve(".venv/bin/python"))) {
+    log("cancel signer: no .venv — leftovers cannot cancel until: sudo apt-get install -y python3-venv && python3 -m venv .venv && .venv/bin/pip install git+https://github.com/elliottech/lighter-python.git");
+  } else {
+    log("cancel signer: .venv/bin/python");
+  }
   server.listen(PORT, HOST, () => log(`status http://${HOST}:${PORT}/`));
   for (;;) {
     if (stopped) return;

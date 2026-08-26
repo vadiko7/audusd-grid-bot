@@ -15,7 +15,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { stepsAway } from "../src/lib/grid/math.ts";
+import { stepsAway, baseQty } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 const execFileAsync = promisify(execFile);
@@ -243,14 +243,21 @@ async function ensureAuth(): Promise<string> {
   return token;
 }
 
-function isGridTicket(book: Book, order: { price: number; notional: number }): boolean {
+function isGridTicket(book: Book, order: { price: number; qty: number; notional: number }): boolean {
+  const n = book.engine.config.orderNotional;
+  if (!(n >= 10) || !(order.price > 0)) return false;
+  const expectedQty = baseQty(order.price, n, book.market.sizeDecimals);
+  const qtyTol = Math.max(expectedQty * 0.12, 10 ** -book.market.sizeDecimals);
+  const notionalTol = Math.max(n * 0.12, 3);
+  const sizeOk =
+    (expectedQty > 0 && Math.abs(order.qty - expectedQty) <= qtyTol) ||
+    Math.abs(order.notional - n) <= notionalTol;
+  if (!sizeOk) return false;
   const a =
     book.engine.lastFillPrice ||
     (Math.abs(book.engine.position.size) > 1 ? book.engine.position.entry : 0) ||
     book.mark;
   if (!(a > 0)) return false;
-  const n = book.engine.config.orderNotional;
-  if (!(order.notional >= 10 && order.notional <= n * 1.6)) return false;
   const steps = stepsAway(a, order.price, book.engine.factor);
   const nearest = Math.round(steps);
   return nearest >= 0 && nearest <= 12 && Math.abs(steps - nearest) < 0.3;

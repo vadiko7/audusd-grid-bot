@@ -196,6 +196,7 @@ type Book = {
   lastManualSkip: number;
   workingAll: { id: string; notional: number }[];
   manuals: GridOrder[];
+  giveUp: Set<string>;
 };
 
 function makeBook(market: MarketProfile): Book {
@@ -210,7 +211,7 @@ function makeBook(market: MarketProfile): Book {
     orderNotional: n,
   });
   const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
-  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [] };
+  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
 
 const books = profiles.map(makeBook);
@@ -246,6 +247,7 @@ async function refreshLive(book: Book) {
   const now = nowMs();
   for (const o of all) {
     if (isMine(book.owned, o)) continue;
+    if (book.giveUp.has(o.id)) continue;
     const hitPending = book.engine.orders.some(
       (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor),
     );
@@ -255,7 +257,7 @@ async function refreshLive(book: Book) {
     }
   }
   adoptOrders(book, all);
-  const mine = all.filter((o) => isMine(book.owned, o));
+  const mine = all.filter((o) => !book.giveUp.has(o.id) && isMine(book.owned, o));
   book.manuals = all.filter((o) => !isMine(book.owned, o));
   const skipped = book.manuals.length;
   if (skipped !== book.lastManualSkip) {
@@ -283,6 +285,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   for (const action of actions) {
     if (action.type !== "cancel") continue;
     if (action.orderId.startsWith("pending:")) continue;
+    if (book.giveUp.has(action.orderId)) continue;
     try {
       const signed = await signCancelOrder(creds, {
         marketIndex: m.marketId,
@@ -294,7 +297,10 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       log(`${m.symbol} tx cancel ${action.side} ${action.price.toFixed(m.priceDecimals)} ${action.orderId} ${res.hash ?? ""}`);
       await new Promise((r) => setTimeout(r, 700));
     } catch (err) {
-      log(`${m.symbol} cancel failed ${action.orderId} ${err instanceof Error ? err.message : String(err)} — left on book`);
+      book.giveUp.add(action.orderId);
+      book.owned.ids = book.owned.ids.filter((x) => x.id !== action.orderId);
+      saveOwned();
+      log(`${m.symbol} cancel failed ${action.orderId} — left as unknown, will not retry`);
     }
   }
   for (const action of actions) {

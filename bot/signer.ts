@@ -152,7 +152,8 @@ export async function signCancelOrder(
     SignCancelOrder?: (...args: unknown[]) => { error?: string; txType?: number; txInfo?: string };
   }).SignCancelOrder;
   if (typeof fn !== "function") throw new Error("SignCancelOrder WASM missing");
-  const idx = String(params.orderIndex);
+  const idx = Number(params.orderIndex);
+  if (!Number.isFinite(idx)) throw new Error(`bad order index ${params.orderIndex}`);
   let result = fn(params.marketIndex, idx, nonce, creds.apiKeyIndex, creds.accountIndex);
   if (result?.error || !result?.txInfo) {
     result = fn(params.marketIndex, idx, 0, nonce, creds.apiKeyIndex, creds.accountIndex);

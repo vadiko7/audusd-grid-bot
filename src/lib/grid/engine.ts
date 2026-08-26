@@ -462,11 +462,9 @@ function cancelAll(state: EngineState, reason: string) {
     return;
   }
   const n = state.orders.length;
-  for (const o of state.orders) state.cancelledIds.push(o.id);
-  emit(state, { type: "cancel_all", why: reason });
-  state.orders = [];
+  for (const o of [...state.orders]) dropOrder(state, o, reason);
   state.lastCleanReason = reason;
-  pushLog(state, "clean", `clean ALL ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (other markets untouched)`);
+  pushLog(state, "clean", `clean ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (other markets untouched)`);
 }
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {

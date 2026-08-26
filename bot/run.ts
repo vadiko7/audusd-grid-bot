@@ -5,7 +5,6 @@ import { parseMarkets, type MarketProfile } from "../src/lib/grid/markets.ts";
 import {
   createInitialState,
   flattenAtMark,
-  maintainPair,
   remainingCapacity,
   setArmed,
   setOrderNotional,
@@ -14,8 +13,8 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { sameRung, stepsAway } from "../src/lib/grid/math.ts";
-import { createAuthToken, dropSigner, refreshNonce, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+import { sameRung } from "../src/lib/grid/math.ts";
+import { createAuthToken, dropSigner, refreshNonce, signCancelOrder, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
   const candidates = [
@@ -282,6 +281,23 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   if (actions.length === 0) return;
   const m = book.market;
   for (const action of actions) {
+    if (action.type !== "cancel") continue;
+    if (action.orderId.startsWith("pending:")) continue;
+    try {
+      const signed = await signCancelOrder(creds, {
+        marketIndex: m.marketId,
+        orderIndex: action.orderId,
+      });
+      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
+      lastTx = res.hash || lastTx;
+      await refreshNonce(creds);
+      log(`${m.symbol} tx cancel ${action.side} ${action.price.toFixed(m.priceDecimals)} ${action.orderId} ${res.hash ?? ""}`);
+      await new Promise((r) => setTimeout(r, 700));
+    } catch (err) {
+      log(`${m.symbol} cancel failed ${action.orderId} ${err instanceof Error ? err.message : String(err)} — left on book`);
+    }
+  }
+  for (const action of actions) {
     if (action.type !== "place") continue;
     const clientOrderIndex = clientSeq++;
     const exec = action.exec === "market" ? "market" : "limit";
@@ -322,68 +338,7 @@ function drainAndSend() {
   for (const j of jobs) j.book.engine.actions = [];
   busy = true;
   (async () => {
-    const anyCancel = jobs.some((j) => j.actions.some((a) => a.type === "cancel" || a.type === "cancel_all"));
-    if (anyCancel) {
-      const manuals = books.flatMap((b) =>
-        b.manuals
-          .filter((o) => {
-            const n = b.engine.config.orderNotional;
-            if (o.notional >= 10 && o.notional <= n * 1.6) {
-              const a = b.engine.lastFillPrice || b.engine.position.entry;
-              if (!(a > 0)) return false;
-              const steps = stepsAway(a, o.price, b.engine.factor);
-              const nearest = Math.round(steps);
-              if (nearest >= 1 && nearest <= 12 && Math.abs(steps - nearest) < 0.3) return false;
-            }
-            return true;
-          })
-          .map((o) => ({ book: b, order: o })),
-      );
-      const now = Date.now();
-      for (const book of books) {
-        for (const o of book.engine.orders) {
-          if (!book.engine.cancelledIds.includes(o.id)) book.engine.cancelledIds.push(o.id);
-          book.engine.cancelSentAt[o.id] = now;
-        }
-      }
-      const signed = await signCancelMarket(creds, 0);
-      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-      lastTx = res.hash || lastTx;
-      await refreshNonce(creds);
-      log(`tx cancel-all account ${res.hash ?? ""}`);
-      for (const { book, order } of manuals) {
-        const m = book.market;
-        const clientOrderIndex = clientSeq++;
-        const signedPlace = await signCreateLimit(creds, {
-          marketIndex: m.marketId,
-          clientOrderIndex,
-          baseAmount: Math.round(order.qty * 10 ** m.sizeDecimals),
-          price: Math.round(order.price * 10 ** m.priceDecimals),
-          isAsk: order.side === "sell",
-        });
-        const placed = await sendTx({
-          ...signedPlace,
-          accountIndex: creds.accountIndex,
-          apiKeyIndex: creds.apiKeyIndex,
-        });
-        lastTx = placed.hash || lastTx;
-        log(
-          `${m.symbol} restore manual ${order.side} ${order.price.toFixed(m.priceDecimals)} × ${order.qty} ${placed.hash ?? ""}`,
-        );
-      }
-      for (const book of books) {
-        book.engine.orders = [];
-        book.engine.actions = [];
-        maintainPair(book.engine, "re-place ±1 after cancel-all");
-      }
-      const placeJobs = books
-        .map((b) => ({ book: b, actions: b.engine.actions.filter((a) => a.type === "place") }))
-        .filter((j) => j.actions.length);
-      for (const j of placeJobs) j.book.engine.actions = [];
-      for (const j of placeJobs) await executeActions(j.book, j.actions);
-    } else {
-      for (const j of jobs) await executeActions(j.book, j.actions);
-    }
+    for (const j of jobs) await executeActions(j.book, j.actions);
     wantOrderPoll = true;
   })()
     .catch(async (err) => {

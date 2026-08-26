@@ -215,7 +215,7 @@ describe("live account source of truth", () => {
     assert.equal(s.orders[0]?.qty, baseQty(0.7, 50));
     setOrderNotional(s, 200);
     assert.equal(s.config.orderNotional, 200);
-    assert.ok(s.actions.some((a) => a.type === "cancel_all"));
+    assert.ok(s.actions.some((a) => a.type === "cancel"));
   });
 });
 

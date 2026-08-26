@@ -176,7 +176,26 @@ export async function signCancelOrder(
   creds: LighterCreds,
   params: { marketIndex: number; orderIndex: string | number },
 ): Promise<SignedTx> {
-  return signCancelMarket(creds, params.marketIndex);
+  await getClient(creds);
+  const nonce = await fetchNextNonce(creds.accountIndex, creds.apiKeyIndex);
+  const fn = (globalThis as unknown as {
+    SignCancelOrder?: (...args: unknown[]) => { error?: string; txType?: number; txInfo?: string };
+  }).SignCancelOrder;
+  if (typeof fn !== "function") throw new Error("SignCancelOrder WASM missing");
+  const idx = String(params.orderIndex);
+  let result = fn(params.marketIndex, idx, nonce, creds.apiKeyIndex, creds.accountIndex);
+  if (result?.error || !result?.txInfo) {
+    result = fn(params.marketIndex, idx, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  }
+  if (result?.error) throw new Error(result.error);
+  if (!result?.txInfo) throw new Error("WASM cancel produced no tx");
+  const txType = Number(result.txType) || 15;
+  process.stdout.write(`${new Date().toISOString()} cancel one ${idx} nonce ${nonce} txType ${txType}\n`);
+  return { txType, txInfo: String(result.txInfo) };
+}
+
+export async function signCancelMarket(creds: LighterCreds, _marketIndex: number): Promise<SignedTx> {
+  throw new Error("account cancel-all disabled — cancel individual bot orders only");
 }
 
 export async function signCancelAll(creds: LighterCreds): Promise<SignedTx> {

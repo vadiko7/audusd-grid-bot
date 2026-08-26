@@ -11,7 +11,7 @@ import {
   snapshotPublic,
   step,
 } from "../src/lib/grid/engine.ts";
-import type { EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
+import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCancelMarket, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
@@ -194,6 +194,7 @@ type Book = {
   owned: Owned;
   lastManualSkip: number;
   workingAll: { id: string; notional: number }[];
+  manuals: GridOrder[];
 };
 
 function makeBook(market: MarketProfile): Book {
@@ -208,7 +209,7 @@ function makeBook(market: MarketProfile): Book {
     orderNotional: n,
   });
   const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
-  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [] };
+  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [] };
 }
 
 const books = profiles.map(makeBook);
@@ -255,7 +256,8 @@ async function refreshLive(book: Book) {
   }
   adoptOrders(book, all);
   const mine = all.filter((o) => isMine(book.owned, o));
-  const skipped = all.length - mine.length;
+  book.manuals = all.filter((o) => !isMine(book.owned, o));
+  const skipped = book.manuals.length;
   if (skipped !== book.lastManualSkip) {
     if (skipped > 0) log(`${book.market.symbol} leaving ${skipped} manual/unknown order(s) untouched`);
     book.lastManualSkip = skipped;
@@ -321,11 +323,41 @@ function drainAndSend() {
   (async () => {
     const anyCancel = jobs.some((j) => j.actions.some((a) => a.type === "cancel" || a.type === "cancel_all"));
     if (anyCancel) {
+      const manuals = books.flatMap((b) =>
+        b.manuals.map((o) => ({ book: b, order: o })),
+      );
+      const now = Date.now();
+      for (const book of books) {
+        for (const o of book.engine.orders) {
+          if (!book.engine.cancelledIds.includes(o.id)) book.engine.cancelledIds.push(o.id);
+          book.engine.cancelSentAt[o.id] = now;
+        }
+      }
       const signed = await signCancelMarket(creds, 0);
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
       await refreshNonce(creds);
       log(`tx cancel-all account ${res.hash ?? ""}`);
+      for (const { book, order } of manuals) {
+        const m = book.market;
+        const clientOrderIndex = clientSeq++;
+        const signedPlace = await signCreateLimit(creds, {
+          marketIndex: m.marketId,
+          clientOrderIndex,
+          baseAmount: Math.round(order.qty * 10 ** m.sizeDecimals),
+          price: Math.round(order.price * 10 ** m.priceDecimals),
+          isAsk: order.side === "sell",
+        });
+        const placed = await sendTx({
+          ...signedPlace,
+          accountIndex: creds.accountIndex,
+          apiKeyIndex: creds.apiKeyIndex,
+        });
+        lastTx = placed.hash || lastTx;
+        log(
+          `${m.symbol} restore manual ${order.side} ${order.price.toFixed(m.priceDecimals)} × ${order.qty} ${placed.hash ?? ""}`,
+        );
+      }
     }
     for (const j of jobs) await executeActions(j.book, j.actions);
   })()

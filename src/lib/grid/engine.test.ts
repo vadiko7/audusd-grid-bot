@@ -342,6 +342,40 @@ describe("engine cycle", () => {
     assert.equal(s.lastFillPrice, sold);
   });
 
+  it("NATGAS: mark through the +1 sell walks lastFill and places the next ±1", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
+    const last = 2.855;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: 35, entry: last };
+    const oldBuy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    s.orders = [{ id: "old", side: "buy", price: oldBuy, qty: 34.36, notional: 96, placedAt: 1 }];
+    setArmed(s, true);
+    const crossed = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    step(s, {
+      now: 2_000,
+      mark: 2.917,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 35, entry: last },
+        positionNotional: 100,
+        orders: [{ id: "old", side: "buy", price: oldBuy, qty: 34.36, notional: 96, placedAt: 1 }],
+      }),
+    });
+    assert.equal(s.lastFillPrice, crossed);
+    const nextSell = upLevel(crossed, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const nextBuy = downLevel(crossed, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const prices = [
+      ...s.orders.map((o) => o.price),
+      ...s.actions.filter((a) => a.type === "place").map((a) => a.price),
+    ];
+    assert.ok(prices.some((p) => Math.abs(p - nextSell) < 1e-6), `need sell ${nextSell} got ${prices}`);
+    assert.ok(prices.some((p) => Math.abs(p - nextBuy) < 1e-6), `need buy ${nextBuy} got ${prices}`);
+    assert.ok(!prices.some((p) => Math.abs(p - crossed) < 1e-6));
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
+    assert.ok(!s.logs.some((l) => l.message.includes("marketable sell")));
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

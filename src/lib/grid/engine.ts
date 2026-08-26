@@ -524,6 +524,49 @@ function recenter(state: EngineState, reason: string) {
   pushLog(state, "clean", `${reason} — wait for a fill; will not seed ±1 from mark`);
 }
 
+function walkCrossedLevels(state: EngineState): Fill | null {
+  if (!state.config.armed) return null;
+  let fillPx = fillAnchor(state);
+  if (!fillPx) return null;
+  const m = state.config.market;
+  let side: Side = "sell";
+  let n = 0;
+  while (n < 8) {
+    const sell = upLevel(fillPx, state.factor, m.priceDecimals);
+    const buy = downLevel(fillPx, state.factor, m.priceDecimals);
+    if (sell > 0 && sell < state.mark) {
+      fillPx = sell;
+      side = "sell";
+      n += 1;
+      continue;
+    }
+    if (buy > 0 && buy > state.mark) {
+      fillPx = buy;
+      side = "buy";
+      n += 1;
+      continue;
+    }
+    break;
+  }
+  if (!n) return null;
+  const fill: Fill = {
+    orderId: "walk",
+    side,
+    price: fillPx,
+    qty: baseQty(fillPx, state.config.orderNotional, m.sizeDecimals),
+    ts: state.now,
+  };
+  state.lastFillPrice = fillPx;
+  state.lastFillSide = side;
+  state.lastFillAt = state.now;
+  pushLog(
+    state,
+    "fill",
+    `mark crossed ${n} rung(s) → lastFill ${fillPx.toFixed(m.priceDecimals)} (mark ${state.mark.toFixed(m.priceDecimals)})`,
+  );
+  return fill;
+}
+
 function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
   if (!fillAnchor(state)) return;
@@ -773,7 +816,13 @@ function runArmedCycle(state: EngineState) {
     postFillMissed(state, latest);
   }
 
-  if (state.fillsThisCycle.length === 0) impulseCoolCatch(state);
+  if (state.fillsThisCycle.length === 0) {
+    if (state.impulseJustCooled) impulseCoolCatch(state);
+    else if (state.accountSource === "live") {
+      const walked = walkCrossedLevels(state);
+      if (walked) postFillMissed(state, walked);
+    }
+  }
 
   if (!waitFill) maintainPair(state, "maintain ±1");
 }

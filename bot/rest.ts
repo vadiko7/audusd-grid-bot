@@ -34,6 +34,8 @@ type RawAccount = {
 type RawOrder = {
   order_index?: number;
   order_id?: string;
+  client_order_index?: number;
+  client_order_id?: string | number;
   market_index?: number;
   market_id?: number;
   price?: string;
@@ -167,6 +169,7 @@ export function mapOrders(raw: RawOrder[], market: Pick<MarketProfile, "marketId
       const qtyRaw = String(o.remaining_base_amount ?? o.initial_base_amount ?? "0");
       const price = priceRaw.includes(".") ? num(priceRaw) : num(priceRaw) / 10 ** market.priceDecimals;
       const qty = qtyRaw.includes(".") ? num(qtyRaw) : num(qtyRaw) / 10 ** market.sizeDecimals;
+      const client = Number(o.client_order_index ?? o.client_order_id);
       return {
         id: String(o.order_index ?? o.order_id ?? ""),
         side,
@@ -174,6 +177,7 @@ export function mapOrders(raw: RawOrder[], market: Pick<MarketProfile, "marketId
         qty,
         notional: qty * price,
         placedAt: Number(o.timestamp ?? o.created_at ?? Date.now()),
+        clientOrderIndex: Number.isFinite(client) ? client : undefined,
       };
     })
     .filter((o) => o.id && o.price > 0 && o.qty > 0);

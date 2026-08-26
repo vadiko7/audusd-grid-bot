@@ -20,6 +20,7 @@ export type GridOrder = {
   qty: number;
   notional: number;
   placedAt: number;
+  clientOrderIndex?: number;
 };
 
 export type Position = {

@@ -60,8 +60,8 @@ export const AUDUSD: MarketProfile = {
   proximityMinPct: 0.5,
   proximityMaxPct: 1.5,
   adverseSteps: 1.75,
-  baseCycleMs: 1_500,
-  elevatedCycleMs: 250,
+  baseCycleMs: 2_000,
+  elevatedCycleMs: 300,
 };
 
 /** NATGAS Long Geometric Grid */
@@ -91,7 +91,7 @@ export const NATGAS: MarketProfile = {
   proximityMinPct: 1.5,
   proximityMaxPct: 4.0,
   adverseSteps: 1.75,
-  baseCycleMs: 12_000,
+  baseCycleMs: 2_000,
   elevatedCycleMs: 300,
 };
 

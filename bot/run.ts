@@ -51,8 +51,46 @@ function log(message: string) {
 
 const envFile = loadDotEnv();
 const SETTINGS_PATH = path.resolve("data/settings.json");
+const OWNED_PATH = path.resolve("data/owned.json");
 
 type SavedSettings = { markets?: Record<string, { orderNotional?: number }>; orderNotional?: number };
+type Owned = { ids: string[]; clients: number[] };
+
+function loadOwned(): Record<string, Owned> {
+  try {
+    if (!existsSync(OWNED_PATH)) return {};
+    return JSON.parse(readFileSync(OWNED_PATH, "utf8")) as Record<string, Owned>;
+  } catch {
+    return {};
+  }
+}
+
+function saveOwned() {
+  mkdirSync(path.dirname(OWNED_PATH), { recursive: true });
+  const dump: Record<string, Owned> = {};
+  for (const b of books) dump[b.market.symbol] = b.owned;
+  writeFileSync(OWNED_PATH, `${JSON.stringify(dump, null, 2)}\n`);
+}
+
+function isMine(owned: Owned, order: { id: string; clientOrderIndex?: number }): boolean {
+  if (owned.ids.includes(order.id)) return true;
+  if (order.clientOrderIndex != null && owned.clients.includes(order.clientOrderIndex)) return true;
+  return false;
+}
+
+function adoptOrders(book: { owned: Owned; market: { symbol: string } }, liveOrders: { id: string; clientOrderIndex?: number }[]) {
+  const ids = new Set(book.owned.ids);
+  const clients = new Set(book.owned.clients);
+  for (const o of liveOrders) {
+    if (o.clientOrderIndex != null && clients.has(o.clientOrderIndex)) ids.add(o.id);
+  }
+  const liveIds = new Set(liveOrders.map((o) => o.id));
+  book.owned = {
+    ids: [...ids].filter((id) => liveIds.has(id)),
+    clients: [...clients],
+  };
+  saveOwned();
+}
 
 function loadSettings(): SavedSettings {
   try {
@@ -104,6 +142,8 @@ type Book = {
   hourly: Candle[];
   minute: Candle | null;
   lastCandles: number;
+  owned: Owned;
+  lastManualSkip: number;
 };
 
 function makeBook(market: MarketProfile): Book {
@@ -119,7 +159,8 @@ function makeBook(market: MarketProfile): Book {
     orderNotional: n,
   });
   if (WANT_DYNAMIC) setDynamic(engine, true);
-  return { market, engine, mark: 0, live: null, hourly: [], minute: null, lastCandles: 0 };
+  const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
+  return { market, engine, mark: 0, live: null, hourly: [], minute: null, lastCandles: 0, owned: persisted, lastManualSkip: -1 };
 }
 
 const books = profiles.map(makeBook);
@@ -149,8 +190,15 @@ async function ensureAuth(): Promise<string> {
 async function refreshLive(book: Book) {
   const acc = await fetchAccount(creds.accountIndex, book.market.marketId);
   const token = await ensureAuth();
-  const orders = await fetchActiveOrders(creds.accountIndex, token, book.market);
-  book.live = { ...acc, orders };
+  const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
+  adoptOrders(book, all);
+  const mine = all.filter((o) => isMine(book.owned, o));
+  const skipped = all.length - mine.length;
+  if (skipped !== book.lastManualSkip) {
+    if (skipped > 0) log(`${book.market.symbol} leaving ${skipped} manual/unknown order(s) untouched`);
+    book.lastManualSkip = skipped;
+  }
+  book.live = { ...acc, orders: mine };
 }
 
 async function executeActions(book: Book, actions: EngineAction[]) {
@@ -163,9 +211,10 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     : [];
   for (const action of actions) {
     if (action.type === "place") {
+      const clientOrderIndex = clientSeq++;
       const signed = await signCreateLimit(creds, {
         marketIndex: m.marketId,
-        clientOrderIndex: clientSeq++,
+        clientOrderIndex,
         baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
         price: Math.round(action.price * 10 ** m.priceDecimals),
         isAsk: action.side === "sell",
@@ -173,10 +222,16 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
+      if (!book.owned.clients.includes(clientOrderIndex)) book.owned.clients.push(clientOrderIndex);
+      saveOwned();
       log(`${m.symbol} tx place ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
     } else if (action.type === "cancel") {
       if (hasCancelAll) continue;
       if (seenCancel.has(action.orderId)) continue;
+      if (!book.owned.ids.includes(action.orderId)) {
+        log(`${m.symbol} skip cancel ${action.orderId} (not bot-owned)`);
+        continue;
+      }
       seenCancel.add(action.orderId);
       const idx = Number(action.orderId);
       if (!Number.isFinite(idx)) continue;
@@ -189,6 +244,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   if (hasCancelAll) {
     for (const id of cancelIds) {
       if (seenCancel.has(id)) continue;
+      if (!book.owned.ids.includes(id)) continue;
       seenCancel.add(id);
       const idx = Number(id);
       if (!Number.isFinite(idx)) continue;

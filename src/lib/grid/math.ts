@@ -32,7 +32,7 @@ export function downLevel(price: number, factor: number, priceDecimals = PRICE_D
 }
 
 export function proximityPct(spacingPct: number, market: MarketProfile = AUDUSD): number {
-  return clamp(market.proximityMult * spacingPct, market.proximityMinPct, market.proximityMaxPct);
+  return market.proximityMult * spacingPct;
 }
 
 export function inProximity(price: number, target: number, proxPct: number): boolean {

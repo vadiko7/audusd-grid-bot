@@ -6,13 +6,12 @@ import {
   createInitialState,
   flattenAtMark,
   setArmed,
-  setDynamic,
   setOrderNotional,
   snapshotPublic,
   step,
 } from "../src/lib/grid/engine.ts";
-import type { Candle, EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
-import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
+import type { EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
+import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, dropSigner, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
@@ -183,7 +182,6 @@ if (!Number.isFinite(creds.apiKeyIndex) || creds.apiKeyIndex < 0 || creds.apiKey
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || "8787");
 const WANT_ARM = process.env.ARM === "1";
-const WANT_DYNAMIC = process.env.DYNAMIC_SPACING === "1";
 const saved = loadSettings();
 const profiles = parseMarkets(process.env.MARKETS);
 
@@ -192,9 +190,6 @@ type Book = {
   engine: EngineState;
   mark: number;
   live: LiveAccount | null;
-  hourly: Candle[];
-  minute: Candle | null;
-  lastCandles: number;
   owned: Owned;
   lastManualSkip: number;
 };
@@ -207,13 +202,11 @@ function makeBook(market: MarketProfile): Book {
     market.orderNotional;
   const engine = createInitialState({
     market,
-    dynamicSpacing: WANT_DYNAMIC,
     armed: false,
     orderNotional: n,
   });
-  if (WANT_DYNAMIC) setDynamic(engine, true);
   const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
-  return { market, engine, mark: 0, live: null, hourly: [], minute: null, lastCandles: 0, owned: persisted, lastManualSkip: -1 };
+  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1 };
 }
 
 const books = profiles.map(makeBook);
@@ -334,15 +327,6 @@ function drainAndSend() {
 
 async function tickBook(book: Book, now: number) {
   book.mark = await fetchMark(book.market.marketId);
-  if (restReady() && now - book.lastCandles > 60_000) {
-    book.lastCandles = now;
-    const [h, m] = await Promise.all([
-      fetchCandles(book.market.marketId, "1h", 30),
-      fetchCandles(book.market.marketId, "1m", 5),
-    ]);
-    book.hourly = h;
-    book.minute = m.at(-1) ?? null;
-  }
   if (restReady() && now - lastAccount > 15_000) {
     await refreshLive(book);
   }
@@ -350,8 +334,6 @@ async function tickBook(book: Book, now: number) {
     step(book.engine, {
       now,
       mark: book.mark,
-      hourlyCandles: book.hourly.length ? book.hourly : undefined,
-      minuteCandle: book.minute,
       live: book.live,
     });
   }
@@ -518,15 +500,9 @@ async function main() {
       for (const book of books) {
         await refreshLive(book);
         book.mark = await fetchMark(book.market.marketId);
-        book.hourly = await fetchCandles(book.market.marketId, "1h", 30);
-        const m = await fetchCandles(book.market.marketId, "1m", 5);
-        book.minute = m.at(-1) ?? null;
-        book.lastCandles = Date.now();
         step(book.engine, {
           now: Date.now(),
           mark: book.mark,
-          hourlyCandles: book.hourly,
-          minuteCandle: book.minute,
           live: book.live,
         });
         log(

@@ -8,14 +8,12 @@ import {
   VELOCITY_SPIKE_WINDOW_MS,
 } from "./constants.ts";
 import { AUDUSD } from "./markets.ts";
-import { applyRegimeHysteresis, atr, atrPct, classifyRegime, spacingFromAtr } from "./atr.ts";
 import { resolveImpulse, velocityPct } from "./impulse.ts";
 import {
   adverseAgainstLong,
   adverseAgainstShort,
   baseQty,
   downLevel,
-  factorFromSpacing,
   inProximity,
   proximityPct,
   roundPrice,
@@ -53,6 +51,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     startingEquity: 0,
     ...config,
     market,
+    dynamicSpacing: false,
   };
   if (!Number.isFinite(cfg.orderNotional) || cfg.orderNotional < 10) cfg.orderNotional = market.orderNotional;
   return {
@@ -437,68 +436,13 @@ function postFillMissed(state: EngineState, fill: Fill) {
   if (!hasNear(state, down)) placeLimit(state, "buy", down, "post-fill missed −1");
 }
 
-function updateSpacingAndRegime(state: EngineState, input: StepInput) {
-  if (input.hourlyCandles && input.hourlyCandles.length > 0) {
-    state.hourlyCandles = input.hourlyCandles;
-  }
-  const candles = state.hourlyCandles;
-  if (candles.length >= 2 && state.mark > 0) {
-    const atrValue = atr(candles);
-    state.atrPct = atrPct(atrValue, state.mark);
-    const raw = classifyRegime(state.atrPct, state.config.market);
-    const lastBarT = candles[candles.length - 1]?.t ?? null;
-    const next = applyRegimeHysteresis(
-      {
-        regime: state.regime,
-        pending: state.pendingRegime,
-        count: state.pendingRegimeCount,
-        lastBarT: state.lastAtrBarT,
-      },
-      raw,
-      lastBarT,
-    );
-    if (next.regime !== state.regime) {
-      pushLog(state, "regime", `regime ${state.regime} → ${next.regime} (ATR ${state.atrPct.toFixed(3)}%)`, {
-        from: state.regime,
-        to: next.regime,
-        atrPct: Number(state.atrPct.toFixed(4)),
-      });
-    }
-    state.regime = next.regime;
-    state.pendingRegime = next.pending;
-    state.pendingRegimeCount = next.count;
-    state.lastAtrBarT = next.lastBarT;
-  }
-
-  const pause = state.regime === "extreme";
-  if (pause !== state.pauseNewOpens) {
-    state.pauseNewOpens = pause;
-    pushLog(state, "regime", pause ? "pause_new_opens = true (extreme)" : "pause_new_opens = false");
-  }
-
+function lockFixedSpacing(state: EngineState) {
   const m = state.config.market;
-  const nextSpacing = state.config.dynamicSpacing
-    ? spacingFromAtr(state.atrPct || m.defaultSpacingPct, m)
-    : m.defaultSpacingPct;
-  const delta = Math.abs(nextSpacing - state.lastAppliedSpacingPct);
-  if (delta >= m.spacingChangeThresholdPct) {
-    const prev = state.lastAppliedSpacingPct;
-    state.spacingPct = nextSpacing;
-    state.factor = factorFromSpacing(nextSpacing);
-    state.lastAppliedSpacingPct = nextSpacing;
-    pushLog(
-      state,
-      "regime",
-      `spacing ${prev.toFixed(2)}% → ${nextSpacing.toFixed(2)}% (factor ${state.factor.toFixed(5)})`,
-    );
-    if (state.config.armed) {
-      cancelAll(state, `spacing change ${delta.toFixed(2)}%`);
-      maintainPair(state, "re-place ±1 after spacing change");
-    }
-  } else {
-    state.spacingPct = state.lastAppliedSpacingPct;
-    state.factor = factorFromSpacing(state.spacingPct);
-  }
+  state.spacingPct = m.defaultSpacingPct;
+  state.factor = m.defaultFactor;
+  state.lastAppliedSpacingPct = m.defaultSpacingPct;
+  state.pauseNewOpens = false;
+  if (state.regime !== "normal") state.regime = "normal";
 }
 
 function updateImpulse(state: EngineState, input: StepInput) {
@@ -533,12 +477,7 @@ function updateCadence(state: EngineState) {
   const recentFill =
     state.lastFillAt != null && state.now - state.lastFillAt <= RECENT_FILL_ELEVATED_MS;
   const elevated =
-    state.config.dynamicSpacing ||
-    state.regime === "high" ||
-    state.regime === "extreme" ||
-    recentFill ||
-    vel5 >= VELOCITY_SPIKE_PCT ||
-    state.impulse !== "none";
+    recentFill || vel5 >= VELOCITY_SPIKE_PCT || state.impulse !== "none";
   state.elevated = elevated;
   state.cycleMs = elevated ? state.config.market.elevatedCycleMs : state.config.market.baseCycleMs;
 }
@@ -555,10 +494,11 @@ export function setArmed(state: EngineState, armed: boolean): EngineState {
   return state;
 }
 
-export function setDynamic(state: EngineState, on: boolean): EngineState {
-  if (state.config.dynamicSpacing === on) return state;
-  state.config = { ...state.config, dynamicSpacing: on };
-  pushLog(state, "info", on ? "dynamic ATR spacing ON" : "dynamic ATR spacing OFF (fixed 0.50%)");
+export function setDynamic(state: EngineState, _on: boolean): EngineState {
+  if (state.config.dynamicSpacing) {
+    state.config = { ...state.config, dynamicSpacing: false };
+  }
+  pushLog(state, "info", `spacing fixed ${state.config.market.defaultSpacingPct.toFixed(2)}% — ATR adaptive off`);
   return state;
 }
 
@@ -653,7 +593,7 @@ export function step(state: EngineState, input: StepInput): EngineState {
 
   if (input.live) ingestLive(state, input.live);
 
-  updateSpacingAndRegime(state, input);
+  lockFixedSpacing(state);
   updateImpulse(state, input);
 
   if (state.config.armed) runArmedCycle(state);

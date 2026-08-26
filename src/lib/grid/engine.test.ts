@@ -445,6 +445,40 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "leftover"));
   });
 
+  it("cancels a bot leftover on the fill price, then places real ±1", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -1533.8, entry: last };
+    const onFill: GridOrder = {
+      id: "onfill",
+      side: "buy",
+      price: last,
+      qty: 139.4,
+      notional: 100,
+      placedAt: 1,
+      mine: true,
+    };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: last },
+        positionNotional: 1100,
+        orders: [onFill],
+      }),
+    });
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "onfill"));
+    const buy = downLevel(last, DEFAULT_FACTOR);
+    const sell = upLevel(last, DEFAULT_FACTOR);
+    const placed = s.actions.filter((a) => a.type === "place").map((a) => a.price);
+    assert.ok(placed.some((p) => Math.abs(p - buy) < 1e-8));
+    assert.ok(placed.some((p) => Math.abs(p - sell) < 1e-8));
+  });
+
   it("when flat and armed with no fill, does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 1000 });
     setArmed(s, true);

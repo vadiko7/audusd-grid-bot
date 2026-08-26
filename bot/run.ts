@@ -15,6 +15,7 @@ import {
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
+import { stepsAway } from "../src/lib/grid/math.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
 const execFileAsync = promisify(execFile);
@@ -242,6 +243,19 @@ async function ensureAuth(): Promise<string> {
   return token;
 }
 
+function isGridTicket(book: Book, order: { price: number; notional: number }): boolean {
+  const a =
+    book.engine.lastFillPrice ||
+    (Math.abs(book.engine.position.size) > 1 ? book.engine.position.entry : 0) ||
+    book.mark;
+  if (!(a > 0)) return false;
+  const n = book.engine.config.orderNotional;
+  if (!(order.notional >= 10 && order.notional <= n * 1.6)) return false;
+  const steps = stepsAway(a, order.price, book.engine.factor);
+  const nearest = Math.round(steps);
+  return nearest >= 0 && nearest <= 12 && Math.abs(steps - nearest) < 0.3;
+}
+
 async function refreshLive(book: Book) {
   const acc = await fetchAccount(creds.accountIndex, book.market.marketId);
   const token = await ensureAuth();
@@ -250,7 +264,7 @@ async function refreshLive(book: Book) {
   adoptOrders(book, all);
   const tagged = all.map((o) => ({
     ...o,
-    mine: !book.giveUp.has(o.id) && isMine(book.owned, o),
+    mine: !book.giveUp.has(o.id) && (isMine(book.owned, o) || isGridTicket(book, o)),
   }));
   book.manuals = tagged.filter((o) => o.mine === false);
   const skipped = book.manuals.length;
@@ -318,11 +332,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       await new Promise((r) => setTimeout(r, 700));
       continue;
     }
-    if (result === "missing") continue;
-    book.giveUp.add(action.orderId);
-    book.owned.ids = book.owned.ids.filter((x) => x.id !== action.orderId);
-    saveOwned();
-    log(`${m.symbol} cancel failed ${action.orderId} — left as unknown, will not retry`);
+    log(`${m.symbol} cancel leftover ${action.orderId} ${result} — will retry`);
   }
   for (const action of actions) {
     if (action.type !== "place") continue;

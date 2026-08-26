@@ -5,6 +5,7 @@ import {
   LIGHTER_WS,
 } from "../src/lib/grid/constants.ts";
 import type { MarketProfile } from "../src/lib/grid/markets.ts";
+import { MARKETS } from "../src/lib/grid/markets.ts";
 import type { Candle, GridOrder, LiveAccount, Side } from "../src/lib/grid/types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -132,6 +133,13 @@ async function lighterGet<T>(path: string, headers?: Record<string, string>): Pr
   return JSON.parse(res.body) as T;
 }
 
+function leverageOf(marketId: number): number {
+  for (const m of Object.values(MARKETS)) {
+    if (m.marketId === marketId) return m.maxLeverage;
+  }
+  return 10;
+}
+
 export function mapAccount(raw: RawAccount, marketId: number): LiveAccount {
   const accountIndex = Number(raw.account_index ?? raw.index ?? 0);
   const pos = (raw.positions ?? []).find((p) => Number(p.market_id) === marketId);
@@ -146,6 +154,12 @@ export function mapAccount(raw: RawAccount, marketId: number): LiveAccount {
   const totalAsset = num(raw.total_asset_value);
   const crossAsset = num(raw.cross_asset_value);
   const equity = totalAsset > 0 ? totalAsset : crossAsset > 0 ? crossAsset : collateral + unrealizedPnl;
+  let foreignMargin = 0;
+  for (const p of raw.positions ?? []) {
+    if (Number(p.market_id) === marketId) continue;
+    const pn = Math.abs(num(p.position_value) || num(p.position) * num(p.avg_entry_price));
+    if (pn > 0) foreignMargin += pn / leverageOf(Number(p.market_id));
+  }
   return {
     accountIndex,
     equity,
@@ -156,6 +170,7 @@ export function mapAccount(raw: RawAccount, marketId: number): LiveAccount {
     unrealizedPnl,
     realizedPnl,
     orders: [],
+    foreignMargin,
   };
 }
 

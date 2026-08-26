@@ -93,6 +93,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     actions: [],
     cancelledIds: [],
     impulseJustCooled: false,
+    foreignMargin: 0,
   };
 }
 
@@ -116,7 +117,9 @@ export function equity(state: EngineState, mark = state.mark): number {
 
 export function remainingCapacity(state: EngineState, mark = state.mark): number {
   if (state.accountSource === "none") return 0;
-  return equity(state, mark) * state.config.market.maxLeverage - positionNotional(state, mark) - pendingNotional(state);
+  const lev = state.config.market.maxLeverage;
+  const free = Math.max(0, equity(state, mark) - state.foreignMargin);
+  return free * lev - positionNotional(state, mark) - pendingNotional(state);
 }
 
 export function isFlat(state: EngineState, mark = state.mark): boolean {
@@ -201,6 +204,7 @@ function applyFill(state: EngineState, fill: Fill) {
 }
 
 function ingestLive(state: EngineState, live: LiveAccount) {
+  state.foreignMargin = Number.isFinite(live.foreignMargin) ? Math.max(0, live.foreignMargin) : 0;
   const prev = state.orders;
   const cancelled = new Set(state.cancelledIds);
   const liveOpen = live.orders.filter((o) => !cancelled.has(o.id));

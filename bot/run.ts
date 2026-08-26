@@ -5,6 +5,7 @@ import { parseMarkets, type MarketProfile } from "../src/lib/grid/markets.ts";
 import {
   createInitialState,
   flattenAtMark,
+  remainingCapacity,
   setArmed,
   setOrderNotional,
   snapshotPublic,
@@ -192,6 +193,7 @@ type Book = {
   live: LiveAccount | null;
   owned: Owned;
   lastManualSkip: number;
+  workingAll: { id: string; notional: number }[];
 };
 
 function makeBook(market: MarketProfile): Book {
@@ -206,7 +208,7 @@ function makeBook(market: MarketProfile): Book {
     orderNotional: n,
   });
   const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
-  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1 };
+  return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [] };
 }
 
 const books = profiles.map(makeBook);
@@ -237,6 +239,20 @@ async function refreshLive(book: Book) {
   const acc = await fetchAccount(creds.accountIndex, book.market.marketId);
   const token = await ensureAuth();
   const all = await fetchActiveOrders(creds.accountIndex, token, book.market);
+  book.workingAll = all.map((o) => ({ id: o.id, notional: o.notional }));
+  const n = book.engine.config.orderNotional;
+  let adopted = 0;
+  for (const o of all) {
+    if (isMine(book.owned, o)) continue;
+    if (o.notional >= 10 && o.notional <= n * 1.6) {
+      book.owned.ids.push({ id: o.id, at: nowMs() });
+      adopted += 1;
+    }
+  }
+  if (adopted) {
+    saveOwned();
+    log(`${book.market.symbol} adopted ${adopted} leftover grid order(s) to clean to ±1`);
+  }
   adoptOrders(book, all);
   const mine = all.filter((o) => isMine(book.owned, o));
   const skipped = all.length - mine.length;
@@ -245,6 +261,18 @@ async function refreshLive(book: Book) {
     book.lastManualSkip = skipped;
   }
   book.live = { ...acc, orders: mine };
+}
+
+function applySharedMargin() {
+  for (const book of books) {
+    if (!book.live) continue;
+    let extra = 0;
+    for (const other of books) {
+      if (other.market.symbol === book.market.symbol) continue;
+      extra += other.workingAll.reduce((s, o) => s + o.notional, 0) / other.market.maxLeverage;
+    }
+    book.live.foreignMargin = (book.live.foreignMargin || 0) + extra;
+  }
 }
 
 async function executeActions(book: Book, actions: EngineAction[]) {
@@ -336,28 +364,28 @@ function drainAndSend() {
     });
 }
 
-async function tickBook(book: Book, now: number) {
-  book.mark = await fetchMark(book.market.marketId);
-  if (restReady() && now - lastAccount > 15_000) {
-    await refreshLive(book);
-  }
-  if (book.mark > 0) {
-    step(book.engine, {
-      now,
-      mark: book.mark,
-      live: book.live,
-    });
-  }
-}
-
 async function tick() {
   if (stopped) return;
   const now = Date.now();
   try {
-    for (const book of books) await tickBook(book, now);
-    if (restReady()) {
+    const poll = restReady() && now - lastAccount > 15_000;
+    for (const book of books) {
+      book.mark = await fetchMark(book.market.marketId);
+      if (poll) await refreshLive(book);
+    }
+    if (poll) {
+      applySharedMargin();
       lastAccount = now;
       lastError = null;
+    }
+    for (const book of books) {
+      if (book.mark > 0) {
+        step(book.engine, {
+          now,
+          mark: book.mark,
+          live: book.live,
+        });
+      }
     }
     drainAndSend();
   } catch (err) {
@@ -511,13 +539,16 @@ async function main() {
       for (const book of books) {
         await refreshLive(book);
         book.mark = await fetchMark(book.market.marketId);
+      }
+      applySharedMargin();
+      for (const book of books) {
         step(book.engine, {
           now: Date.now(),
           mark: book.mark,
           live: book.live,
         });
         log(
-          `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark}`,
+          `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
       }

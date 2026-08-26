@@ -63,6 +63,8 @@ export type LiveAccount = {
   unrealizedPnl: number;
   realizedPnl: number;
   orders: GridOrder[];
+  /** USD margin already used by other markets on this account. */
+  foreignMargin: number;
 };
 
 export type EngineAction =
@@ -117,6 +119,7 @@ export type EngineState = {
   actions: EngineAction[];
   cancelledIds: string[];
   impulseJustCooled: boolean;
+  foreignMargin: number;
 };
 
 export type StepInput = {

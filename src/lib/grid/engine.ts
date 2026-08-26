@@ -302,6 +302,37 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
   return null;
 }
 
+function expectedFillPnl(state: EngineState, side: Side, price: number, qty: number): {
+  pnl: number;
+  kind: "reduce" | "add" | "open";
+  note: string;
+} {
+  const pos = state.position.size;
+  const entry = state.position.entry;
+  if (Math.abs(pos) < FLAT_NOTIONAL_EPS || entry <= 0) {
+    return { pnl: 0, kind: "open", note: `open ${side} from flat` };
+  }
+  const reducing = (pos < 0 && side === "buy") || (pos > 0 && side === "sell");
+  if (reducing) {
+    const closeQty = Math.min(qty, Math.abs(pos));
+    const pnl = pos < 0 ? (entry - price) * closeQty : (price - entry) * closeQty;
+    const sign = pnl >= 0 ? "+" : "";
+    return {
+      pnl,
+      kind: "reduce",
+      note: `if filled REDUCE PnL ${sign}$${pnl.toFixed(2)} vs entry ${entry.toFixed(state.config.market.priceDecimals)}`,
+    };
+  }
+  const improves = pos < 0 ? price > entry : price < entry;
+  return {
+    pnl: 0,
+    kind: "add",
+    note: improves
+      ? `if filled ADD ${pos < 0 ? "short above" : "long below"} entry (better avg)`
+      : `if filled ADD ${pos < 0 ? "short below" : "long above"} entry (worse avg)`,
+  };
+}
+
 function placeLimit(state: EngineState, side: Side, target: number, why: string): boolean {
   const m = state.config.market;
   const price = roundPrice(target, m.priceDecimals);
@@ -327,11 +358,16 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string)
   };
   state.orders = [...state.orders, order];
   emit(state, { type: "place", side, price, qty, why });
-  pushLog(state, "place", `place ${side.toUpperCase()} ${price.toFixed(5)} × ${qty.toFixed(1)} (${why})`, {
+  const expect = expectedFillPnl(state, side, price, qty);
+  const px = price.toFixed(m.priceDecimals);
+  const q = qty.toFixed(m.sizeDecimals);
+  pushLog(state, "place", `place ${side.toUpperCase()} ${px} × ${q} (${why}) · ${expect.note}`, {
     side,
     price,
     qty,
     why,
+    expectPnl: Number(expect.pnl.toFixed(2)),
+    expectKind: expect.kind,
   });
   return true;
 }
@@ -346,7 +382,7 @@ function cancelAll(state: EngineState, reason: string) {
   emit(state, { type: "cancel_all", why: reason });
   state.orders = [];
   state.lastCleanReason = reason;
-  pushLog(state, "clean", `clean ALL ${n} limit(s) — ${reason}`);
+  pushLog(state, "clean", `clean ALL ${n} bot limit(s) on ${state.config.market.symbol} — ${reason} (other markets untouched)`);
 }
 
 function cleanInvalid(state: EngineState) {

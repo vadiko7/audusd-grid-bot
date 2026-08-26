@@ -53,13 +53,60 @@ const envFile = loadDotEnv();
 const SETTINGS_PATH = path.resolve("data/settings.json");
 const OWNED_PATH = path.resolve("data/owned.json");
 
+const OWNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 type SavedSettings = { markets?: Record<string, { orderNotional?: number }>; orderNotional?: number };
-type Owned = { ids: string[]; clients: number[] };
+type Owned = {
+  ids: Array<{ id: string; at: number }>;
+  clients: Array<{ n: number; at: number }>;
+};
+
+function nowMs() {
+  return Date.now();
+}
+
+function pruneOwned(owned: Owned, now = nowMs()): Owned {
+  const cut = now - OWNED_TTL_MS;
+  return {
+    ids: owned.ids.filter((x) => x.at > cut),
+    clients: owned.clients.filter((x) => x.at > cut).slice(-200),
+  };
+}
+
+function coerceOwned(raw: unknown): Owned {
+  const empty: Owned = { ids: [], clients: [] };
+  if (!raw || typeof raw !== "object") return empty;
+  const o = raw as { ids?: unknown; clients?: unknown };
+  const ids: Owned["ids"] = [];
+  if (Array.isArray(o.ids)) {
+    for (const x of o.ids) {
+      if (typeof x === "string") ids.push({ id: x, at: nowMs() });
+      else if (x && typeof x === "object" && typeof (x as { id?: unknown }).id === "string") {
+        const at = Number((x as { at?: unknown }).at);
+        ids.push({ id: (x as { id: string }).id, at: Number.isFinite(at) ? at : nowMs() });
+      }
+    }
+  }
+  const clients: Owned["clients"] = [];
+  if (Array.isArray(o.clients)) {
+    for (const x of o.clients) {
+      if (typeof x === "number") clients.push({ n: x, at: nowMs() });
+      else if (x && typeof x === "object" && Number.isFinite(Number((x as { n?: unknown }).n))) {
+        const at = Number((x as { at?: unknown }).at);
+        clients.push({ n: Number((x as { n: number }).n), at: Number.isFinite(at) ? at : nowMs() });
+      }
+    }
+  }
+  return pruneOwned({ ids, clients });
+}
 
 function loadOwned(): Record<string, Owned> {
   try {
     if (!existsSync(OWNED_PATH)) return {};
-    return JSON.parse(readFileSync(OWNED_PATH, "utf8")) as Record<string, Owned>;
+    const raw = JSON.parse(readFileSync(OWNED_PATH, "utf8")) as Record<string, unknown>;
+    const out: Record<string, Owned> = {};
+    for (const [k, v] of Object.entries(raw)) out[k] = coerceOwned(v);
+    return out;
   } catch {
     return {};
   }
@@ -73,22 +120,28 @@ function saveOwned() {
 }
 
 function isMine(owned: Owned, order: { id: string; clientOrderIndex?: number }): boolean {
-  if (owned.ids.includes(order.id)) return true;
-  if (order.clientOrderIndex != null && owned.clients.includes(order.clientOrderIndex)) return true;
+  if (owned.ids.some((x) => x.id === order.id)) return true;
+  if (order.clientOrderIndex != null && owned.clients.some((x) => x.n === order.clientOrderIndex)) return true;
   return false;
 }
 
 function adoptOrders(book: { owned: Owned; market: { symbol: string } }, liveOrders: { id: string; clientOrderIndex?: number }[]) {
-  const ids = new Set(book.owned.ids);
-  const clients = new Set(book.owned.clients);
+  const now = nowMs();
+  book.owned = pruneOwned(book.owned, now);
+  const ids = new Map(book.owned.ids.map((x) => [x.id, x.at]));
+  const clients = new Map(book.owned.clients.map((x) => [x.n, x.at]));
   for (const o of liveOrders) {
-    if (o.clientOrderIndex != null && clients.has(o.clientOrderIndex)) ids.add(o.id);
+    if (o.clientOrderIndex != null && clients.has(o.clientOrderIndex)) {
+      ids.set(o.id, now);
+      clients.set(o.clientOrderIndex, now);
+    }
+    if (ids.has(o.id)) ids.set(o.id, now);
   }
   const liveIds = new Set(liveOrders.map((o) => o.id));
-  book.owned = {
-    ids: [...ids].filter((id) => liveIds.has(id)),
-    clients: [...clients],
-  };
+  book.owned = pruneOwned({
+    ids: [...ids.entries()].filter(([id]) => liveIds.has(id)).map(([id, at]) => ({ id, at })),
+    clients: [...clients.entries()].map(([n, at]) => ({ n, at })),
+  }, now);
   saveOwned();
 }
 
@@ -222,13 +275,15 @@ async function executeActions(book: Book, actions: EngineAction[]) {
       });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
-      if (!book.owned.clients.includes(clientOrderIndex)) book.owned.clients.push(clientOrderIndex);
+      if (!book.owned.clients.some((x) => x.n === clientOrderIndex)) {
+        book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
+      }
       saveOwned();
       log(`${m.symbol} tx place ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
     } else if (action.type === "cancel") {
       if (hasCancelAll) continue;
       if (seenCancel.has(action.orderId)) continue;
-      if (!book.owned.ids.includes(action.orderId)) {
+      if (!book.owned.ids.some((x) => x.id === action.orderId)) {
         log(`${m.symbol} skip cancel ${action.orderId} (not bot-owned)`);
         continue;
       }
@@ -244,7 +299,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   if (hasCancelAll) {
     for (const id of cancelIds) {
       if (seenCancel.has(id)) continue;
-      if (!book.owned.ids.includes(id)) continue;
+      if (!book.owned.ids.some((x) => x.id === id)) continue;
       seenCancel.add(id);
       const idx = Number(id);
       if (!Number.isFinite(idx)) continue;

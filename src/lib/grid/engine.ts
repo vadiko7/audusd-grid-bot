@@ -654,13 +654,17 @@ export function maintainPair(state: EngineState, why: string) {
   }
   const levels = validLevels(state);
   const m = state.config.market;
-  pushLog(
-    state,
-    "info",
-    `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} $/lvl ${state.config.orderNotional}`,
-  );
-  if (!hasNear(state, levels.sell, "sell")) placeLimit(state, "sell", levels.sell, why);
-  if (!isFlat(state) && !hasNear(state, levels.buy, "buy")) placeLimit(state, "buy", levels.buy, why);
+  const needSell = !hasNear(state, levels.sell, "sell");
+  const needBuy = !isFlat(state) && !hasNear(state, levels.buy, "buy");
+  if (why.startsWith("arm") || needSell || needBuy) {
+    pushLog(
+      state,
+      "info",
+      `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} $/lvl ${state.config.orderNotional}`,
+    );
+  }
+  if (needSell) placeLimit(state, "sell", levels.sell, why);
+  if (needBuy) placeLimit(state, "buy", levels.buy, why);
 }
 
 function postFillMissed(state: EngineState, fill: Fill) {

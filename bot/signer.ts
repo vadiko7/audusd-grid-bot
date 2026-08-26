@@ -151,7 +151,7 @@ export async function signCancelMarket(creds: LighterCreds, marketIndex: number)
     ) => { error?: string; txType?: number; txInfo?: string };
   }).SignCancelAllOrders;
   if (typeof fn !== "function") throw new Error("SignCancelAllOrders WASM missing");
-  const result = fn(0, Date.now(), marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
+  const result = fn(0, 0, marketIndex, 0, nonce, creds.apiKeyIndex, creds.accountIndex);
   if (result?.error) throw new Error(result.error);
   if (!result?.txInfo) throw new Error("WASM cancel-market produced no tx");
   return { txType: Number(result.txType ?? 16), txInfo: String(result.txInfo) };

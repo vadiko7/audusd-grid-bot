@@ -1,43 +1,38 @@
-import {
-  ADVERSE_STEPS,
-  ORDER_NOTIONAL,
-  PRICE_DECIMALS,
-  PROXIMITY_MAX_PCT,
-  PROXIMITY_MIN_PCT,
-  PROXIMITY_MULT,
-  SIZE_DECIMALS,
-} from "./constants.ts";
+import { AUDUSD, type MarketProfile } from "./markets.ts";
+import { ADVERSE_STEPS, ORDER_NOTIONAL, PRICE_DECIMALS, SIZE_DECIMALS } from "./constants.ts";
 
-const PRICE_MULT = 10 ** PRICE_DECIMALS;
-const SIZE_MULT = 10 ** SIZE_DECIMALS;
-
-export function roundPrice(price: number): number {
-  return Math.round(price * PRICE_MULT) / PRICE_MULT;
+export function roundTo(value: number, decimals: number): number {
+  const m = 10 ** decimals;
+  return Math.round(value * m) / m;
 }
 
-export function roundQty(qty: number): number {
-  return Math.round(qty * SIZE_MULT) / SIZE_MULT;
+export function roundPrice(price: number, decimals = PRICE_DECIMALS): number {
+  return roundTo(price, decimals);
 }
 
-export function baseQty(mark: number, notional = ORDER_NOTIONAL): number {
+export function roundQty(qty: number, decimals = SIZE_DECIMALS): number {
+  return roundTo(qty, decimals);
+}
+
+export function baseQty(mark: number, notional = ORDER_NOTIONAL, sizeDecimals = SIZE_DECIMALS): number {
   if (mark <= 0 || notional <= 0) return 0;
-  return roundQty(notional / mark);
+  return roundQty(notional / mark, sizeDecimals);
 }
 
 export function factorFromSpacing(spacingPct: number): number {
   return 1 + spacingPct / 100;
 }
 
-export function upLevel(price: number, factor: number): number {
-  return roundPrice(price * factor);
+export function upLevel(price: number, factor: number, priceDecimals = PRICE_DECIMALS): number {
+  return roundPrice(price * factor, priceDecimals);
 }
 
-export function downLevel(price: number, factor: number): number {
-  return roundPrice(price / factor);
+export function downLevel(price: number, factor: number, priceDecimals = PRICE_DECIMALS): number {
+  return roundPrice(price / factor, priceDecimals);
 }
 
-export function proximityPct(spacingPct: number): number {
-  return clamp(PROXIMITY_MULT * spacingPct, PROXIMITY_MIN_PCT, PROXIMITY_MAX_PCT);
+export function proximityPct(spacingPct: number, market: MarketProfile = AUDUSD): number {
+  return clamp(market.proximityMult * spacingPct, market.proximityMinPct, market.proximityMaxPct);
 }
 
 export function inProximity(price: number, target: number, proxPct: number): boolean {
@@ -50,14 +45,14 @@ export function stepsAway(from: number, to: number, factor: number): number {
   return Math.abs(Math.log(to / from) / Math.log(factor));
 }
 
-export function adverseAgainstShort(anchor: number, mark: number, factor: number): boolean {
+export function adverseAgainstShort(anchor: number, mark: number, factor: number, steps = ADVERSE_STEPS): boolean {
   if (anchor <= 0 || mark <= anchor) return false;
-  return stepsAway(anchor, mark, factor) >= ADVERSE_STEPS;
+  return stepsAway(anchor, mark, factor) >= steps;
 }
 
-export function adverseAgainstLong(anchor: number, mark: number, factor: number): boolean {
+export function adverseAgainstLong(anchor: number, mark: number, factor: number, steps = ADVERSE_STEPS): boolean {
   if (anchor <= 0 || mark >= anchor) return false;
-  return stepsAway(anchor, mark, factor) >= ADVERSE_STEPS;
+  return stepsAway(anchor, mark, factor) >= steps;
 }
 
 export function clamp(value: number, min: number, max: number): number {

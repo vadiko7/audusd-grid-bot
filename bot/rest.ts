@@ -3,10 +3,8 @@ import { promisify } from "node:util";
 import {
   LIGHTER_REST,
   LIGHTER_WS,
-  MARKET_ID,
-  PRICE_DECIMALS,
-  SIZE_DECIMALS,
 } from "../src/lib/grid/constants.ts";
+import type { MarketProfile } from "../src/lib/grid/markets.ts";
 import type { Candle, GridOrder, LiveAccount, Side } from "../src/lib/grid/types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -132,9 +130,9 @@ async function lighterGet<T>(path: string, headers?: Record<string, string>): Pr
   return JSON.parse(res.body) as T;
 }
 
-export function mapAccount(raw: RawAccount): LiveAccount {
+export function mapAccount(raw: RawAccount, marketId: number): LiveAccount {
   const accountIndex = Number(raw.account_index ?? raw.index ?? 0);
-  const pos = (raw.positions ?? []).find((p) => Number(p.market_id) === MARKET_ID);
+  const pos = (raw.positions ?? []).find((p) => Number(p.market_id) === marketId);
   const sign = num(pos?.sign) || 0;
   const absSize = num(pos?.position);
   const size = sign === 0 ? 0 : sign * absSize;
@@ -159,16 +157,16 @@ export function mapAccount(raw: RawAccount): LiveAccount {
   };
 }
 
-export function mapOrders(raw: RawOrder[]): GridOrder[] {
+export function mapOrders(raw: RawOrder[], market: Pick<MarketProfile, "marketId" | "priceDecimals" | "sizeDecimals">): GridOrder[] {
   return raw
-    .filter((o) => Number(o.market_index ?? o.market_id ?? MARKET_ID) === MARKET_ID)
+    .filter((o) => Number(o.market_index ?? o.market_id ?? market.marketId) === market.marketId)
     .map((o) => {
       const isAsk = o.is_ask === true || o.side === "sell" || o.side === "ask";
       const side: Side = isAsk ? "sell" : "buy";
       const priceRaw = String(o.price ?? "0");
       const qtyRaw = String(o.remaining_base_amount ?? o.initial_base_amount ?? "0");
-      const price = priceRaw.includes(".") ? num(priceRaw) : num(priceRaw) / 10 ** PRICE_DECIMALS;
-      const qty = qtyRaw.includes(".") ? num(qtyRaw) : num(qtyRaw) / 10 ** SIZE_DECIMALS;
+      const price = priceRaw.includes(".") ? num(priceRaw) : num(priceRaw) / 10 ** market.priceDecimals;
+      const qty = qtyRaw.includes(".") ? num(qtyRaw) : num(qtyRaw) / 10 ** market.sizeDecimals;
       return {
         id: String(o.order_index ?? o.order_id ?? ""),
         side,
@@ -181,20 +179,24 @@ export function mapOrders(raw: RawOrder[]): GridOrder[] {
     .filter((o) => o.id && o.price > 0 && o.qty > 0);
 }
 
-export async function fetchAccount(accountIndex: number): Promise<LiveAccount> {
+export async function fetchAccount(accountIndex: number, marketId: number): Promise<LiveAccount> {
   const json = await lighterGet<{ code: number; message?: string; accounts?: RawAccount[] }>(
     `/api/v1/account?by=index&value=${encodeURIComponent(String(accountIndex))}`,
   );
   if (json.code !== 200 || !json.accounts?.[0]) {
     throw new Error(json.message || "Account not found on Lighter");
   }
-  return mapAccount(json.accounts[0]);
+  return mapAccount(json.accounts[0], marketId);
 }
 
-export async function fetchActiveOrders(accountIndex: number, auth: string): Promise<GridOrder[]> {
+export async function fetchActiveOrders(
+  accountIndex: number,
+  auth: string,
+  market: Pick<MarketProfile, "marketId" | "priceDecimals" | "sizeDecimals">,
+): Promise<GridOrder[]> {
   const qs = new URLSearchParams({
     account_index: String(accountIndex),
-    market_id: String(MARKET_ID),
+    market_id: String(market.marketId),
     auth,
   });
   const json = await lighterGet<{ code: number; message?: string; orders?: RawOrder[] }>(
@@ -204,32 +206,37 @@ export async function fetchActiveOrders(accountIndex: number, auth: string): Pro
   if (json.code && json.code !== 200) {
     throw new Error(json.message || "Failed to load open orders");
   }
-  return mapOrders(json.orders ?? []);
+  return mapOrders(json.orders ?? [], market);
 }
 
-function markFromBooks(json: {
-  order_book_details?: BookRow[];
-  order_books?: BookRow[];
-}): number {
+function markFromBooks(
+  json: { order_book_details?: BookRow[]; order_books?: BookRow[] },
+  marketId: number,
+): number {
   const rows = json.order_book_details ?? json.order_books ?? [];
-  const row = rows.find((r) => Number(r.market_id) === MARKET_ID) ?? rows[0];
+  const row = rows.find((r) => Number(r.market_id) === marketId) ?? rows[0];
   return Number(row?.mark_price);
 }
 
-let lastWsMark = 0;
-let lastWsAt = 0;
+const wsMarks = new Map<number, { mark: number; at: number }>();
+const subscribed = new Set<number>();
 let markSocket: WebSocket | null = null;
 let wsRetry: ReturnType<typeof setTimeout> | null = null;
 let wsPing: ReturnType<typeof setInterval> | null = null;
 
-function startMarkSocket() {
-  if (markSocket && (markSocket.readyState === WebSocket.OPEN || markSocket.readyState === WebSocket.CONNECTING)) {
+function startMarkSocket(marketId: number) {
+  subscribed.add(marketId);
+  if (markSocket && markSocket.readyState === WebSocket.OPEN) {
+    markSocket.send(JSON.stringify({ type: "subscribe", channel: `market_stats/${marketId}` }));
     return;
   }
+  if (markSocket && markSocket.readyState === WebSocket.CONNECTING) return;
   const sock = new WebSocket(LIGHTER_WS);
   markSocket = sock;
   sock.addEventListener("open", () => {
-    sock.send(JSON.stringify({ type: "subscribe", channel: `market_stats/${MARKET_ID}` }));
+    for (const id of subscribed) {
+      sock.send(JSON.stringify({ type: "subscribe", channel: `market_stats/${id}` }));
+    }
     if (wsPing) clearInterval(wsPing);
     wsPing = setInterval(() => {
       if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "ping" }));
@@ -245,10 +252,7 @@ function startMarkSocket() {
       const stats = msg.market_stats ?? msg;
       const id = Number(stats.market_id);
       const mark = Number(stats.mark_price);
-      if (mark > 0 && (id === MARKET_ID || !Number.isFinite(id))) {
-        lastWsMark = mark;
-        lastWsAt = Date.now();
-      }
+      if (mark > 0 && Number.isFinite(id)) wsMarks.set(id, { mark, at: Date.now() });
     } catch {
       /* ignore malformed frames */
     }
@@ -260,7 +264,8 @@ function startMarkSocket() {
       wsPing = null;
     }
     if (wsRetry) clearTimeout(wsRetry);
-    wsRetry = setTimeout(startMarkSocket, 2_000);
+    const first = [...subscribed][0];
+    if (first != null) wsRetry = setTimeout(() => startMarkSocket(first), 2_000);
   });
   sock.addEventListener("error", () => {
     try {
@@ -271,19 +276,20 @@ function startMarkSocket() {
   });
 }
 
-export function peekMark(): number {
-  return lastWsMark > 0 ? lastWsMark : 0;
+export function peekMark(marketId: number): number {
+  return wsMarks.get(marketId)?.mark ?? 0;
 }
 
-export async function fetchMark(): Promise<number> {
-  startMarkSocket();
-  if (peekMark() > 0 && Date.now() - lastWsAt < 12_000) return peekMark();
-  if (restReady() && peekMark() <= 0) {
+export async function fetchMark(marketId: number): Promise<number> {
+  startMarkSocket(marketId);
+  const hit = wsMarks.get(marketId);
+  if (hit && Date.now() - hit.at < 12_000) return hit.mark;
+  if (restReady() && !hit) {
     try {
       const json = await lighterGet<{ order_book_details?: BookRow[] }>(
-        `/api/v1/orderBookDetails?market_id=${MARKET_ID}`,
+        `/api/v1/orderBookDetails?market_id=${marketId}`,
       );
-      const mark = markFromBooks(json);
+      const mark = markFromBooks(json, marketId);
       if (mark > 0) return mark;
     } catch {
       /* wait for WS */
@@ -292,18 +298,23 @@ export async function fetchMark(): Promise<number> {
   const until = Date.now() + 4_000;
   while (Date.now() < until) {
     await new Promise((r) => setTimeout(r, 150));
-    if (peekMark() > 0) return peekMark();
+    const again = wsMarks.get(marketId);
+    if (again) return again.mark;
   }
-  if (lastWsMark > 0) return lastWsMark;
-  throw new Error("AUDUSD mark missing (waiting for public WS market_stats)");
+  if (hit) return hit.mark;
+  throw new Error(`mark missing market ${marketId} (waiting for public WS market_stats)`);
 }
 
-export async function fetchCandles(resolution: "1m" | "1h", countBack: number): Promise<Candle[]> {
+export async function fetchCandles(
+  marketId: number,
+  resolution: "1m" | "1h",
+  countBack: number,
+): Promise<Candle[]> {
   const now = Date.now();
   const hours = resolution === "1h" ? countBack + 2 : 6;
   const start = now - hours * 3600_000;
   const path =
-    `/api/v1/markPriceCandles?market_id=${MARKET_ID}` +
+    `/api/v1/markPriceCandles?market_id=${marketId}` +
     `&resolution=${resolution}&start_timestamp=${start}&end_timestamp=${now}` +
     `&count_back=${countBack}`;
   const json = await lighterGet<{ c?: Candle[] }>(path);

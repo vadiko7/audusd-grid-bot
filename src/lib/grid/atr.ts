@@ -11,6 +11,7 @@ import {
   SPACING_MAX_PCT,
   SPACING_MIN_PCT,
 } from "./constants.ts";
+import type { MarketProfile } from "./markets.ts";
 import { clamp } from "./math.ts";
 import type { Candle, Regime } from "./types.ts";
 
@@ -37,15 +38,24 @@ export function atrPct(atrValue: number, mark: number): number {
   return (atrValue / mark) * 100;
 }
 
-export function classifyRegime(atrPercent: number): Regime {
-  if (atrPercent > REGIME_EXTREME) return "extreme";
-  if (atrPercent > REGIME_HIGH) return "high";
-  if (atrPercent < REGIME_LOW) return "low";
+export function classifyRegime(atrPercent: number, market?: Pick<MarketProfile, "regimeLow" | "regimeHigh" | "regimeExtreme">): Regime {
+  const low = market?.regimeLow ?? REGIME_LOW;
+  const high = market?.regimeHigh ?? REGIME_HIGH;
+  const extreme = market?.regimeExtreme ?? REGIME_EXTREME;
+  if (atrPercent > extreme) return "extreme";
+  if (atrPercent > high) return "high";
+  if (atrPercent < low) return "low";
   return "normal";
 }
 
-export function spacingFromAtr(atrPercent: number): number {
-  return clamp(atrPercent * ATR_SPACING_MULT, SPACING_MIN_PCT, SPACING_MAX_PCT);
+export function spacingFromAtr(
+  atrPercent: number,
+  market?: Pick<MarketProfile, "atrSpacingMult" | "spacingMinPct" | "spacingMaxPct">,
+): number {
+  const mult = market?.atrSpacingMult ?? ATR_SPACING_MULT;
+  const min = market?.spacingMinPct ?? SPACING_MIN_PCT;
+  const max = market?.spacingMaxPct ?? SPACING_MAX_PCT;
+  return clamp(atrPercent * mult, min, max);
 }
 
 export function spacingFromRegime(regime: Regime): number {

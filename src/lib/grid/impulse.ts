@@ -28,11 +28,11 @@ export function candleDeltaPct(open: number, close: number): number {
   return ((close - open) / open) * 100;
 }
 
-export function nextImpulse(prev: Impulse, signedPct: number): Impulse {
+export function nextImpulse(prev: Impulse, signedPct: number, trigger = IMPULSE_TRIGGER_PCT, cool = IMPULSE_COOL_PCT): Impulse {
   const mag = Math.abs(signedPct);
-  if (mag < IMPULSE_COOL_PCT) return "none";
-  if (signedPct >= IMPULSE_TRIGGER_PCT) return "buy";
-  if (signedPct <= -IMPULSE_TRIGGER_PCT) return "sell";
+  if (mag < cool) return "none";
+  if (signedPct >= trigger) return "buy";
+  if (signedPct <= -trigger) return "sell";
   return prev;
 }
 
@@ -43,12 +43,19 @@ export function resolveImpulse(opts: {
   now: number;
   minuteOpen?: number | null;
   minuteClose?: number | null;
+  triggerPct?: number;
+  coolPct?: number;
+  windowMs?: number;
 }): { impulse: Impulse; deltaPct: number } {
-  const vel = velocityPct(opts.history, opts.mark, opts.now, IMPULSE_WINDOW_MS);
+  const windowMs = opts.windowMs ?? IMPULSE_WINDOW_MS;
+  const vel = velocityPct(opts.history, opts.mark, opts.now, windowMs);
   const candle =
     opts.minuteOpen != null && opts.minuteClose != null
       ? candleDeltaPct(opts.minuteOpen, opts.minuteClose)
       : 0;
   const signed = Math.abs(vel) >= Math.abs(candle) ? vel : candle;
-  return { impulse: nextImpulse(opts.prev, signed), deltaPct: signed };
+  return {
+    impulse: nextImpulse(opts.prev, signed, opts.triggerPct ?? IMPULSE_TRIGGER_PCT, opts.coolPct ?? IMPULSE_COOL_PCT),
+    deltaPct: signed,
+  };
 }

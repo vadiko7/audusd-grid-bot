@@ -1,3 +1,5 @@
+import type { MarketProfile } from "./markets.ts";
+
 export type Side = "buy" | "sell";
 export type Impulse = "none" | "buy" | "sell";
 export type Regime = "low" | "normal" | "high" | "extreme";
@@ -68,6 +70,7 @@ export type EngineAction =
   | { type: "cancel_all"; why: string };
 
 export type EngineConfig = {
+  market: MarketProfile;
   dynamicSpacing: boolean;
   armed: boolean;
   /** USD notional per grid level. Live-adjustable. */
@@ -120,4 +123,38 @@ export type StepInput = {
   hourlyCandles?: Candle[];
   minuteCandle?: Candle | null;
   live?: LiveAccount | null;
+};
+
+export type PublicSnapshot = {
+  symbol: string;
+  prefer: "long" | "short";
+  marketId: number;
+  mark: number;
+  equity: number;
+  remaining: number;
+  positionNotional: number;
+  pendingNotional: number;
+  position: Position;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  orders: GridOrder[];
+  logs: LogEvent[];
+  regime: Regime;
+  pauseNewOpens: boolean;
+  impulse: Impulse;
+  impulseDeltaPct: number;
+  spacingPct: number;
+  factor: number;
+  atrPct: number;
+  cycleMs: number;
+  elevated: boolean;
+  armed: boolean;
+  dynamicSpacing: boolean;
+  orderNotional: number;
+  accountSource: EngineState["accountSource"];
+  lastFillPrice: number | null;
+  lastFillAt: number | null;
+  lastFillSide: Side | null;
+  levels: { sell: number; buy: number };
+  bias: "short" | "long" | "flat";
 };

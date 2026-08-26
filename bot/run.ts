@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { MARKET_ID, ORDER_NOTIONAL, PRICE_DECIMALS, SIZE_DECIMALS } from "../src/lib/grid/constants.ts";
+import { parseMarkets, type MarketProfile } from "../src/lib/grid/markets.ts";
 import {
   createInitialState,
   flattenAtMark,
@@ -10,11 +10,10 @@ import {
   setOrderNotional,
   snapshotPublic,
   step,
-  type PublicSnapshot,
 } from "../src/lib/grid/engine.ts";
 import type { Candle, EngineAction, EngineState, LiveAccount } from "../src/lib/grid/types.ts";
 import { fetchAccount, fetchActiveOrders, fetchCandles, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { createAuthToken, dropSigner, signCancelAll, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
+import { createAuthToken, dropSigner, signCancelOrder, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 function loadDotEnv() {
   const candidates = [
@@ -31,12 +30,7 @@ function loadDotEnv() {
       if (i < 0) continue;
       const k = t.slice(0, i).trim();
       let v = t.slice(i + 1).trim();
-      if (
-        (v.startsWith('"') && v.endsWith('"')) ||
-        (v.startsWith("'") && v.endsWith("'"))
-      ) {
-        v = v.slice(1, -1);
-      }
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
       if (process.env[k] == null || process.env[k] === "") process.env[k] = v;
     }
     log(`loaded ${file}`);
@@ -56,10 +50,9 @@ function log(message: string) {
 }
 
 const envFile = loadDotEnv();
-
 const SETTINGS_PATH = path.resolve("data/settings.json");
 
-type SavedSettings = { orderNotional?: number };
+type SavedSettings = { markets?: Record<string, { orderNotional?: number }>; orderNotional?: number };
 
 function loadSettings(): SavedSettings {
   try {
@@ -70,10 +63,12 @@ function loadSettings(): SavedSettings {
   }
 }
 
-function saveSettings(partial: SavedSettings) {
+function saveSettings(symbol: string, orderNotional: number) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-  const next = { ...loadSettings(), ...partial };
-  writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`);
+  const prev = loadSettings();
+  const markets = { ...(prev.markets ?? {}) };
+  markets[symbol] = { orderNotional };
+  writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
 
 function parseNotional(raw: unknown): number | null {
@@ -99,26 +94,45 @@ const PORT = Number(process.env.PORT || "8787");
 const WANT_ARM = process.env.ARM === "1";
 const WANT_DYNAMIC = process.env.DYNAMIC_SPACING === "1";
 const saved = loadSettings();
-const startNotional =
-  parseNotional(saved.orderNotional) ??
-  parseNotional(process.env.ORDER_NOTIONAL) ??
-  ORDER_NOTIONAL;
+const profiles = parseMarkets(process.env.MARKETS);
 
-const engine: EngineState = createInitialState({
-  dynamicSpacing: WANT_DYNAMIC,
-  armed: false,
-  orderNotional: startNotional,
-});
-if (WANT_DYNAMIC) setDynamic(engine, true);
+type Book = {
+  market: MarketProfile;
+  engine: EngineState;
+  mark: number;
+  live: LiveAccount | null;
+  hourly: Candle[];
+  minute: Candle | null;
+  lastCandles: number;
+};
+
+function makeBook(market: MarketProfile): Book {
+  const n =
+    parseNotional(saved.markets?.[market.symbol]?.orderNotional) ??
+    (market.symbol === "AUDUSD" ? parseNotional(saved.orderNotional) : null) ??
+    parseNotional(process.env[`ORDER_NOTIONAL_${market.symbol}`]) ??
+    market.orderNotional;
+  const engine = createInitialState({
+    market,
+    dynamicSpacing: WANT_DYNAMIC,
+    armed: false,
+    orderNotional: n,
+  });
+  if (WANT_DYNAMIC) setDynamic(engine, true);
+  return { market, engine, mark: 0, live: null, hourly: [], minute: null, lastCandles: 0 };
+}
+
+const books = profiles.map(makeBook);
+const bySymbol = new Map(books.map((b) => [b.market.symbol, b]));
+
+function bookOf(symbol: string | null): Book | undefined {
+  if (!symbol) return books[0];
+  return bySymbol.get(symbol.toUpperCase());
+}
 
 let lastError: string | null = null;
 let lastTx: string | null = null;
 let auth: { token: string; exp: number } | null = null;
-let live: LiveAccount | null = null;
-let mark = 0;
-let hourly: Candle[] = [];
-let minute: Candle | null = null;
-let lastCandles = 0;
 let lastAccount = 0;
 let clientSeq = Date.now();
 let busy = false;
@@ -132,56 +146,71 @@ async function ensureAuth(): Promise<string> {
   return token;
 }
 
-async function refreshLive() {
-  const acc = await fetchAccount(creds.accountIndex);
+async function refreshLive(book: Book) {
+  const acc = await fetchAccount(creds.accountIndex, book.market.marketId);
   const token = await ensureAuth();
-  const orders = await fetchActiveOrders(creds.accountIndex, token);
-  live = { ...acc, orders };
+  const orders = await fetchActiveOrders(creds.accountIndex, token, book.market);
+  book.live = { ...acc, orders };
 }
 
-async function executeActions(actions: EngineAction[]) {
+async function executeActions(book: Book, actions: EngineAction[]) {
   if (actions.length === 0) return;
+  const m = book.market;
   const seenCancel = new Set<string>();
   const hasCancelAll = actions.some((a) => a.type === "cancel_all");
+  const cancelIds = hasCancelAll
+    ? [...new Set(book.engine.cancelledIds.filter((id) => !id.startsWith("pending:")))]
+    : [];
   for (const action of actions) {
     if (action.type === "place") {
       const signed = await signCreateLimit(creds, {
-        marketIndex: MARKET_ID,
+        marketIndex: m.marketId,
         clientOrderIndex: clientSeq++,
-        baseAmount: Math.round(action.qty * 10 ** SIZE_DECIMALS),
-        price: Math.round(action.price * 10 ** PRICE_DECIMALS),
+        baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
+        price: Math.round(action.price * 10 ** m.priceDecimals),
         isAsk: action.side === "sell",
         reduceOnly: action.reduceOnly,
       });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
-      log(`tx place ${action.side} ${action.price.toFixed(5)} × ${action.qty.toFixed(1)} ${res.hash ?? ""}`);
+      log(`${m.symbol} tx place ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
     } else if (action.type === "cancel") {
       if (hasCancelAll) continue;
       if (seenCancel.has(action.orderId)) continue;
       seenCancel.add(action.orderId);
       const idx = Number(action.orderId);
       if (!Number.isFinite(idx)) continue;
-      const signed = await signCancelOrder(creds, { marketIndex: MARKET_ID, orderIndex: idx });
+      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: idx });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
-      log(`tx cancel ${action.orderId} ${res.hash ?? ""}`);
-    } else if (action.type === "cancel_all") {
-      const signed = await signCancelAll(creds);
+      log(`${m.symbol} tx cancel ${action.orderId} ${res.hash ?? ""}`);
+    }
+  }
+  if (hasCancelAll) {
+    for (const id of cancelIds) {
+      if (seenCancel.has(id)) continue;
+      seenCancel.add(id);
+      const idx = Number(id);
+      if (!Number.isFinite(idx)) continue;
+      const signed = await signCancelOrder(creds, { marketIndex: m.marketId, orderIndex: idx });
       const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
       lastTx = res.hash || lastTx;
-      log(`tx cancel_all ${res.hash ?? ""}`);
+      log(`${m.symbol} tx cancel ${id} ${res.hash ?? ""}`);
     }
   }
 }
 
 function drainAndSend() {
   if (busy) return;
-  const actions = engine.actions.slice();
-  engine.actions = [];
-  if (!actions.length) return;
+  const jobs = books
+    .map((b) => ({ book: b, actions: b.engine.actions.slice() }))
+    .filter((j) => j.actions.length);
+  if (!jobs.length) return;
+  for (const j of jobs) j.book.engine.actions = [];
   busy = true;
-  executeActions(actions)
+  (async () => {
+    for (const j of jobs) await executeActions(j.book, j.actions);
+  })()
     .catch((err) => {
       lastError = err instanceof Error ? err.message : String(err);
       log(`tx error ${lastError}`);
@@ -192,156 +221,164 @@ function drainAndSend() {
     });
 }
 
+async function tickBook(book: Book, now: number) {
+  book.mark = await fetchMark(book.market.marketId);
+  if (restReady() && now - book.lastCandles > 60_000) {
+    book.lastCandles = now;
+    const [h, m] = await Promise.all([
+      fetchCandles(book.market.marketId, "1h", 30),
+      fetchCandles(book.market.marketId, "1m", 5),
+    ]);
+    book.hourly = h;
+    book.minute = m.at(-1) ?? null;
+  }
+  if (restReady() && now - lastAccount > 15_000) {
+    await refreshLive(book);
+  }
+  if (book.mark > 0) {
+    step(book.engine, {
+      now,
+      mark: book.mark,
+      hourlyCandles: book.hourly.length ? book.hourly : undefined,
+      minuteCandle: book.minute,
+      live: book.live,
+    });
+  }
+}
+
 async function tick() {
   if (stopped) return;
   const now = Date.now();
   try {
-    mark = await fetchMark();
-    if (restReady() && now - lastCandles > 60_000) {
-      lastCandles = now;
-      const [h, m] = await Promise.all([fetchCandles("1h", 30), fetchCandles("1m", 5)]);
-      hourly = h;
-      minute = m.at(-1) ?? null;
-    }
-    if (restReady() && now - lastAccount > 15_000) {
+    for (const book of books) await tickBook(book, now);
+    if (restReady()) {
       lastAccount = now;
-      await refreshLive();
+      lastError = null;
     }
-    if (restReady()) lastError = null;
+    drainAndSend();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     lastError = message;
-    const quiet = message.includes("cooldown");
-    if (!quiet) log(`feed error ${message}`);
+    if (!message.includes("cooldown")) log(`feed error ${message}`);
   }
-
-  if (mark > 0) {
-    step(engine, {
-      now,
-      mark,
-      hourlyCandles: hourly.length ? hourly : undefined,
-      minuteCandle: minute,
-      live,
-    });
-    drainAndSend();
-  }
-  timer = setTimeout(tick, Math.max(engine.cycleMs, 800));
+  const wait = Math.min(...books.map((b) => b.engine.cycleMs));
+  timer = setTimeout(tick, Math.max(wait, 250));
 }
 
-function status(): PublicSnapshot & { error: string | null; lastTx: string | null; accountIndex: number } {
+function status() {
   return {
-    ...snapshotPublic(engine),
+    accountIndex: creds.accountIndex,
     error: lastError,
     lastTx,
-    accountIndex: creds.accountIndex,
+    books: books.map((b) => snapshotPublic(b.engine)),
   };
 }
 
 function htmlPage(): string {
+  const titles = books.map((b) => `${b.market.symbol} ${b.market.prefer}`).join(" + ");
   return `<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AUDUSD grid</title>
+<title>${titles}</title>
 <style>
-body{font:14px/1.45 ui-sans-serif,system-ui;background:#08090b;color:#ecece8;margin:24px}
+body{font:14px/1.45 ui-sans-serif,system-ui;background:#08090b;color:#ecece8;margin:20px}
 .muted{color:#8b8e93} .ok{color:#3f9a78} .warn{color:#c4a35a} .bad{color:#c45c4a}
 ul{padding-left:1.1rem} code{font-family:ui-monospace,Menlo,monospace}
 button{background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.35rem .7rem;margin-right:.4rem;cursor:pointer}
+.grid{display:grid;gap:1.2rem;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.card{background:#101216;border:1px solid #2e323a;padding:1rem 1.1rem}
+input{width:6rem;margin:0 .4rem;background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.3rem}
 </style></head><body>
-<h1>AUDUSD short grid <span id="acct" class="muted"></span></h1>
-<p id="line">loading…</p>
+<h1>grid desk <span id="acct" class="muted"></span></h1>
 <p id="err" class="bad"></p>
 <p id="tx" class="muted"></p>
-<p>
-  <button type="button" data-cmd="/arm">Arm</button>
-  <button type="button" data-cmd="/disarm">Disarm</button>
-  <button type="button" data-cmd="/flatten">Flatten</button>
-</p>
-<p>
-  <label>$ / level
-    <input id="notional" type="number" min="10" max="10000" step="1" style="width:6rem;margin:0 .4rem;background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.3rem">
-  </label>
-  <button type="button" id="setNotional">Set</button>
-  <span class="muted">10–10000 USD. Applies immediately; saved across reboot.</span>
-</p>
-<h2>Working</h2><ul id="orders"><li>none</li></ul>
-<h2>Blotter</h2><ul id="logs"></ul>
+<div class="grid" id="books"></div>
 <script>
-function esc(s){
-  return String(s).replace(/[&<>]/g, function(c){
-    if (c === "&") return "&#38;";
-    if (c === "<") return "&#60;";
-    return "&#62;";
-  });
+function esc(s){return String(s).replace(/[&<>]/g,c=>c==="&"?"&#38;":c==="<"? "&#60;":"&#62;");}
+function card(s){
+  const d = s.prefer==="long"?4:5;
+  const q = s.prefer==="long"?2:1;
+  const orders=(s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(d)+" × "+Number(o.qty).toFixed(q)+"</li>").join("")||"<li>none</li>";
+  const logs=[...(s.logs||[])].slice(-24).reverse().map(l=>"<li><code>"+new Date(l.ts).toISOString().slice(11,19)+"</code> "+esc(l.level)+" "+esc(l.message)+"</li>").join("")||"<li>empty</li>";
+  return '<div class="card" data-sym="'+esc(s.symbol)+'">'
+    +"<h2>"+esc(s.symbol)+" "+esc(s.prefer)+" <code>m"+s.marketId+"</code></h2>"
+    +"<p>armed <strong class='"+(s.armed?"ok":"warn")+"'>"+s.armed+"</strong>"
+    +" · mark <code>"+Number(s.mark).toFixed(d)+"</code>"
+    +" · equity <code>$"+Number(s.equity).toFixed(2)+"</code>"
+    +" · pos <code>"+Number(s.position.size).toFixed(q)+"</code>"
+    +" · rem <code>$"+Number(s.remaining).toFixed(0)+"</code>"
+    +" · $/lvl <code>"+Number(s.orderNotional).toFixed(0)+"</code></p>"
+    +'<p><button data-cmd="/arm">Arm</button><button data-cmd="/disarm">Disarm</button><button data-cmd="/flatten">Flatten</button></p>'
+    +'<p><label>$/lvl <input class="notional" type="number" min="10" max="10000" step="1" value="'+Number(s.orderNotional)+'"></label>'
+    +'<button class="setNotional">Set</button></p>'
+    +"<h3>Working</h3><ul>"+orders+"</ul><h3>Blotter</h3><ul>"+logs+"</ul></div>";
 }
 async function refresh(){
   const s = await fetch("/status",{cache:"no-store"}).then(r=>r.json());
   document.getElementById("acct").textContent = "acct "+s.accountIndex;
-  document.getElementById("line").innerHTML =
-    "armed <strong class='"+(s.armed?"ok":"warn")+"'>"+s.armed+"</strong>"
-    +" · source "+esc(s.accountSource)
-    +" · mark <code>"+Number(s.mark).toFixed(5)+"</code>"
-    +" · equity <code>$"+Number(s.equity).toFixed(2)+"</code>"
-    +" · pos <code>"+Number(s.position.size).toFixed(1)+"</code>"
-    +" · remaining <code>$"+Number(s.remaining).toFixed(0)+"</code>"
-    +" · $/lvl <code>"+Number(s.orderNotional).toFixed(0)+"</code>";
   document.getElementById("err").textContent = s.error || "";
   document.getElementById("tx").textContent = s.lastTx ? "last tx "+s.lastTx : "";
-  const inp = document.getElementById("notional");
-  if (inp && document.activeElement !== inp) inp.value = String(s.orderNotional);
-  const orders = (s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(5)+" × "+Number(o.qty).toFixed(1)+"</li>");
-  document.getElementById("orders").innerHTML = orders.join("") || "<li>none</li>";
-  const logs = [...(s.logs||[])].slice(-40).reverse()
-    .map(l=>"<li><code>"+new Date(l.ts).toISOString().slice(11,19)+"</code> "+esc(l.level)+" "+esc(l.message)+"</li>");
-  document.getElementById("logs").innerHTML = logs.join("") || "<li>empty</li>";
+  const root = document.getElementById("books");
+  const focus = document.activeElement && document.activeElement.classList.contains("notional");
+  if (!focus) root.innerHTML = (s.books||[]).map(card).join("");
 }
-document.querySelectorAll("button[data-cmd]").forEach(b=>{
-  b.onclick = async ()=>{ await fetch(b.dataset.cmd,{method:"POST"}); refresh(); };
+document.getElementById("books").addEventListener("click", async (ev)=>{
+  const t = ev.target;
+  if (!(t instanceof HTMLElement)) return;
+  const cardEl = t.closest(".card");
+  if (!cardEl) return;
+  const sym = cardEl.getAttribute("data-sym");
+  if (t.dataset.cmd){
+    await fetch(t.dataset.cmd+"?symbol="+encodeURIComponent(sym),{method:"POST"});
+    refresh();
+  }
+  if (t.classList.contains("setNotional")){
+    const usd = cardEl.querySelector(".notional").value;
+    await fetch("/notional?symbol="+encodeURIComponent(sym)+"&usd="+encodeURIComponent(usd),{method:"POST"});
+    refresh();
+  }
 });
-document.getElementById("setNotional").onclick = async ()=>{
-  const usd = document.getElementById("notional").value;
-  await fetch("/notional?usd="+encodeURIComponent(usd),{method:"POST"});
-  refresh();
-};
 refresh();
 setInterval(refresh, 2000);
 </script>
 </body></html>`;
 }
 
-function command(pathName: string): string | null {
-  if (pathName === "/arm") return "arm";
-  if (pathName === "/disarm") return "disarm";
-  if (pathName === "/flatten") return "flatten";
-  return null;
-}
-
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
-  const cmd = command(url.pathname);
-  if (cmd && req.method === "POST") {
-    if (cmd === "arm") setArmed(engine, true);
-    if (cmd === "disarm") setArmed(engine, false);
-    if (cmd === "flatten") flattenAtMark(engine);
+  const symbol = url.searchParams.get("symbol");
+  if (req.method === "POST" && (url.pathname === "/arm" || url.pathname === "/disarm" || url.pathname === "/flatten")) {
+    const targets = symbol ? [bookOf(symbol)].filter(Boolean) : books;
+    if (!targets.length) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unknown symbol" }));
+      return;
+    }
+    for (const b of targets as Book[]) {
+      if (url.pathname === "/arm") setArmed(b.engine, true);
+      if (url.pathname === "/disarm") setArmed(b.engine, false);
+      if (url.pathname === "/flatten") flattenAtMark(b.engine);
+      log(`http ${url.pathname.slice(1)} ${b.market.symbol}`);
+    }
     drainAndSend();
-    log(`http ${cmd}`);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, armed: engine.config.armed }));
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
   if (url.pathname === "/notional" && req.method === "POST") {
+    const b = bookOf(symbol);
     const usd = parseNotional(url.searchParams.get("usd"));
-    if (usd == null) {
+    if (!b || usd == null) {
       res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "usd must be 10–10000" }));
+      res.end(JSON.stringify({ ok: false, error: "symbol + usd 10–10000" }));
       return;
     }
-    setOrderNotional(engine, usd);
-    saveSettings({ orderNotional: engine.config.orderNotional });
+    setOrderNotional(b.engine, usd);
+    saveSettings(b.market.symbol, b.engine.config.orderNotional);
     drainAndSend();
-    log(`http notional $${engine.config.orderNotional}`);
+    log(`http notional ${b.market.symbol} $${b.engine.config.orderNotional}`);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, orderNotional: engine.config.orderNotional }));
+    res.end(JSON.stringify({ ok: true, symbol: b.market.symbol, orderNotional: b.engine.config.orderNotional }));
     return;
   }
   if (url.pathname === "/status") {
@@ -360,24 +397,34 @@ const server = http.createServer((req, res) => {
 });
 
 async function main() {
-  log(`bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} arm_on_start=${WANT_ARM} notional=$${startNotional} env=${envFile ?? "process-env"}`);
+  log(
+    `bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} markets=${books.map((b) => b.market.symbol).join(",")} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`,
+  );
   server.listen(PORT, HOST, () => log(`status http://${HOST}:${PORT}/`));
   for (;;) {
     if (stopped) return;
     try {
-      await refreshLive();
-      mark = await fetchMark();
-      hourly = await fetchCandles("1h", 30);
-      const m = await fetchCandles("1m", 5);
-      minute = m.at(-1) ?? null;
-      lastAccount = Date.now();
-      lastCandles = Date.now();
-      step(engine, { now: Date.now(), mark, hourlyCandles: hourly, minuteCandle: minute, live });
-      log(`live equity $${engine.accountEquity?.toFixed(2)} pos ${engine.position.size.toFixed(1)} mark ${mark.toFixed(5)}`);
-      if (WANT_ARM) {
-        setArmed(engine, true);
-        drainAndSend();
+      for (const book of books) {
+        await refreshLive(book);
+        book.mark = await fetchMark(book.market.marketId);
+        book.hourly = await fetchCandles(book.market.marketId, "1h", 30);
+        const m = await fetchCandles(book.market.marketId, "1m", 5);
+        book.minute = m.at(-1) ?? null;
+        book.lastCandles = Date.now();
+        step(book.engine, {
+          now: Date.now(),
+          mark: book.mark,
+          hourlyCandles: book.hourly,
+          minuteCandle: book.minute,
+          live: book.live,
+        });
+        log(
+          `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark}`,
+        );
+        if (WANT_ARM) setArmed(book.engine, true);
       }
+      lastAccount = Date.now();
+      drainAndSend();
       timer = setTimeout(tick, 80);
       return;
     } catch (err) {

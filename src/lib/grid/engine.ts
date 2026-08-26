@@ -1,19 +1,13 @@
 import {
-  ADVERSE_STEPS,
-  BASE_CYCLE_MS,
-  DEFAULT_FACTOR,
-  DEFAULT_SPACING_PCT,
-  ELEVATED_CYCLE_MS,
   FLAT_NOTIONAL_EPS,
   LOG_LIMIT,
   MARK_HISTORY_LIMIT,
-  MAX_LEVERAGE,
   ORDER_NOTIONAL,
   RECENT_FILL_ELEVATED_MS,
-  SPACING_CHANGE_THRESHOLD_PCT,
   VELOCITY_SPIKE_PCT,
   VELOCITY_SPIKE_WINDOW_MS,
 } from "./constants.ts";
+import { AUDUSD } from "./markets.ts";
 import { applyRegimeHysteresis, atr, atrPct, classifyRegime, spacingFromAtr } from "./atr.ts";
 import { resolveImpulse, velocityPct } from "./impulse.ts";
 import {
@@ -50,21 +44,24 @@ function pushLog(
 }
 
 export function createInitialState(config: Partial<EngineConfig> = {}): EngineState {
+  const market = config.market ?? AUDUSD;
   const cfg: EngineConfig = {
+    market,
     dynamicSpacing: false,
     armed: false,
-    orderNotional: ORDER_NOTIONAL,
+    orderNotional: market.orderNotional,
     startingEquity: 0,
     ...config,
+    market,
   };
-  if (!Number.isFinite(cfg.orderNotional) || cfg.orderNotional < 10) cfg.orderNotional = ORDER_NOTIONAL;
+  if (!Number.isFinite(cfg.orderNotional) || cfg.orderNotional < 10) cfg.orderNotional = market.orderNotional;
   return {
     config: cfg,
     now: 0,
     mark: 0,
     prevMark: null,
-    factor: DEFAULT_FACTOR,
-    spacingPct: DEFAULT_SPACING_PCT,
+    factor: market.defaultFactor,
+    spacingPct: market.defaultSpacingPct,
     regime: "normal",
     pauseNewOpens: false,
     impulse: "none",
@@ -80,13 +77,13 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     accountSource: cfg.startingEquity > 0 ? "sim" : "none",
     markHistory: [],
     logs: [],
-    cycleMs: BASE_CYCLE_MS,
+    cycleMs: market.baseCycleMs,
     elevated: false,
     orderSeq: 1,
     pendingRegime: null,
     pendingRegimeCount: 0,
     lastAtrBarT: null,
-    lastAppliedSpacingPct: DEFAULT_SPACING_PCT,
+    lastAppliedSpacingPct: market.defaultSpacingPct,
     fillsThisCycle: [],
     lastCleanReason: null,
     hourlyCandles: [],
@@ -117,7 +114,7 @@ export function equity(state: EngineState, mark = state.mark): number {
 
 export function remainingCapacity(state: EngineState, mark = state.mark): number {
   if (state.accountSource === "none") return 0;
-  return equity(state, mark) * MAX_LEVERAGE - positionNotional(state, mark) - pendingNotional(state);
+  return equity(state, mark) * state.config.market.maxLeverage - positionNotional(state, mark) - pendingNotional(state);
 }
 
 export function isFlat(state: EngineState, mark = state.mark): boolean {
@@ -141,7 +138,8 @@ function anchorPrice(state: EngineState): number {
 
 export function validLevels(state: EngineState): { sell: number; buy: number } {
   const a = anchorPrice(state);
-  return { sell: upLevel(a, state.factor), buy: downLevel(a, state.factor) };
+  const m = state.config.market;
+  return { sell: upLevel(a, state.factor, m.priceDecimals), buy: downLevel(a, state.factor, m.priceDecimals) };
 }
 
 function detectFills(state: EngineState): Fill[] {
@@ -251,7 +249,7 @@ function emit(state: EngineState, action: EngineAction) {
 }
 
 function hasNear(state: EngineState, target: number): boolean {
-  const prox = proximityPct(state.spacingPct);
+  const prox = proximityPct(state.spacingPct, state.config.market);
   return state.orders.some((o) => inProximity(o.price, target, prox));
 }
 
@@ -290,8 +288,8 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     };
   }
 
-  if (isFlat(state) && side === "buy") {
-    return { reason: "flat — skip opposite (short-preferring)" };
+  if (isFlat(state) && side !== (state.config.market.prefer === "long" ? "buy" : "sell")) {
+    return { reason: `flat — skip opposite (${state.config.market.prefer}-preferring)` };
   }
 
   if (side === "sell" && target <= state.mark) {
@@ -305,15 +303,16 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
 }
 
 function placeLimit(state: EngineState, side: Side, target: number, why: string): boolean {
-  const price = roundPrice(target);
+  const m = state.config.market;
+  const price = roundPrice(target, m.priceDecimals);
   const fail = gateCandidate(state, side, price);
   if (fail) {
     if (fail.reason !== "disarmed" && fail.reason !== "no live account") {
-      pushLog(state, "gate", `gate ${side.toUpperCase()} ${price.toFixed(5)} — ${fail.reason}`, fail.extra);
+      pushLog(state, "gate", `gate ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} — ${fail.reason}`, fail.extra);
     }
     return false;
   }
-  const qty = baseQty(state.mark, state.config.orderNotional);
+  const qty = baseQty(state.mark, state.config.orderNotional, m.sizeDecimals);
   if (qty <= 0) {
     pushLog(state, "gate", "gate — base_qty is 0");
     return false;
@@ -353,7 +352,7 @@ function cancelAll(state: EngineState, reason: string) {
 function cleanInvalid(state: EngineState) {
   if (!fillAnchor(state)) return;
   const levels = validLevels(state);
-  const prox = proximityPct(state.spacingPct);
+  const prox = proximityPct(state.spacingPct, state.config.market);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
     const belongs =
@@ -410,7 +409,7 @@ function updateSpacingAndRegime(state: EngineState, input: StepInput) {
   if (candles.length >= 2 && state.mark > 0) {
     const atrValue = atr(candles);
     state.atrPct = atrPct(atrValue, state.mark);
-    const raw = classifyRegime(state.atrPct);
+    const raw = classifyRegime(state.atrPct, state.config.market);
     const lastBarT = candles[candles.length - 1]?.t ?? null;
     const next = applyRegimeHysteresis(
       {
@@ -441,11 +440,12 @@ function updateSpacingAndRegime(state: EngineState, input: StepInput) {
     pushLog(state, "regime", pause ? "pause_new_opens = true (extreme)" : "pause_new_opens = false");
   }
 
+  const m = state.config.market;
   const nextSpacing = state.config.dynamicSpacing
-    ? spacingFromAtr(state.atrPct || DEFAULT_SPACING_PCT)
-    : DEFAULT_SPACING_PCT;
+    ? spacingFromAtr(state.atrPct || m.defaultSpacingPct, m)
+    : m.defaultSpacingPct;
   const delta = Math.abs(nextSpacing - state.lastAppliedSpacingPct);
-  if (delta >= SPACING_CHANGE_THRESHOLD_PCT) {
+  if (delta >= m.spacingChangeThresholdPct) {
     const prev = state.lastAppliedSpacingPct;
     state.spacingPct = nextSpacing;
     state.factor = factorFromSpacing(nextSpacing);
@@ -475,6 +475,9 @@ function updateImpulse(state: EngineState, input: StepInput) {
     now: state.now,
     minuteOpen: minute?.o ?? null,
     minuteClose: minute?.c ?? null,
+    triggerPct: state.config.market.impulseTriggerPct,
+    coolPct: state.config.market.impulseCoolPct,
+    windowMs: state.config.market.impulseWindowMs,
   });
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
@@ -501,7 +504,7 @@ function updateCadence(state: EngineState) {
     vel5 >= VELOCITY_SPIKE_PCT ||
     state.impulse !== "none";
   state.elevated = elevated;
-  state.cycleMs = elevated ? ELEVATED_CYCLE_MS : BASE_CYCLE_MS;
+  state.cycleMs = elevated ? state.config.market.elevatedCycleMs : state.config.market.baseCycleMs;
 }
 
 export function setArmed(state: EngineState, armed: boolean): EngineState {
@@ -546,7 +549,7 @@ export function flattenAtMark(state: EngineState): EngineState {
   const side: Side = state.position.size < 0 ? "buy" : "sell";
   if (state.accountSource === "live") {
     cancelAll(state, "flatten");
-    emit(state, { type: "place", side, price: roundPrice(state.mark), qty, why: "flatten", reduceOnly: true });
+    emit(state, { type: "place", side, price: roundPrice(state.mark, state.config.market.priceDecimals), qty, why: "flatten", reduceOnly: true });
     pushLog(state, "info", `flatten ${side.toUpperCase()} ${qty.toFixed(1)} @ mark (reduce-only limit)`);
     return state;
   }
@@ -574,11 +577,12 @@ export function resetSession(state: EngineState): EngineState {
 function runArmedCycle(state: EngineState) {
   const currentBias = bias(state);
   const anchor = fillAnchor(state);
-  if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor)) {
-    recenter(state, `adverse ≥ ${ADVERSE_STEPS} steps against short`);
+  const steps = state.config.market.adverseSteps;
+  if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
+    recenter(state, `adverse ≥ ${steps} steps against short`);
     maintainPair(state, "re-place ±1 after adverse");
-  } else if (anchor && currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor)) {
-    recenter(state, `adverse ≥ ${ADVERSE_STEPS} steps against long`);
+  } else if (anchor && currentBias === "long" && adverseAgainstLong(anchor, state.mark, state.factor, steps)) {
+    recenter(state, `adverse ≥ ${steps} steps against long`);
     maintainPair(state, "re-place ±1 after adverse");
   } else if (anchor) {
     cleanInvalid(state);
@@ -624,12 +628,16 @@ export function step(state: EngineState, input: StepInput): EngineState {
 
 export function snapshotPublic(state: EngineState) {
   const mark = state.mark;
+  const m = state.config.market;
   const posN = positionNotional(state);
   const pend = pendingNotional(state);
   const eq = equity(state);
   const remaining = remainingCapacity(state);
   const levels = mark > 0 ? validLevels(state) : { sell: 0, buy: 0 };
   return {
+    symbol: m.symbol,
+    prefer: m.prefer,
+    marketId: m.marketId,
     mark,
     equity: eq,
     remaining,

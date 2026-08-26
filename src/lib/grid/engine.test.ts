@@ -611,6 +611,33 @@ describe("engine cycle", () => {
     assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-4));
   });
 
+  it("does not place a duplicate on a rung that already has any order", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -1533.8, entry: last };
+    const buy = downLevel(last, DEFAULT_FACTOR);
+    const sell = upLevel(last, DEFAULT_FACTOR);
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 0.71729,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -1533.8, entry: last },
+        positionNotional: 1100,
+        orders: [
+          { id: "man", side: "buy", price: buy, qty: 10, notional: 7, placedAt: 1, mine: false },
+        ],
+      }),
+    });
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(!places.some((a) => a.side === "buy"));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "man"));
+    assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
+  });
+
   it("with lastFill and no bot orders, places the missing ±1", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;

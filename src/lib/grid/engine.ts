@@ -179,6 +179,7 @@ function detectFills(state: EngineState): Fill[] {
   if (prevMark == null || mark <= 0) return [];
   const fills: Fill[] = [];
   for (const order of orders) {
+    if (!isMineOrder(order)) continue;
     const crossedSell = order.side === "sell" && prevMark < order.price && mark >= order.price;
     const crossedBuy = order.side === "buy" && prevMark > order.price && mark <= order.price;
     if (crossedSell || crossedBuy) {
@@ -258,6 +259,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     state.unackedPosDelta += posDelta;
   }
   const vanished = prev.filter((order) => {
+    if (!isMineOrder(order)) return false;
     if (nextIds.has(order.id)) return false;
     if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;
     if (order.id.startsWith("pending:")) return false;
@@ -483,10 +485,10 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     return { reason: `just-filled level ${target.toFixed(5)}` };
   }
 
-  if (state.orders.filter((o) => o.side === side).length >= 1) {
+  if (state.orders.filter((o) => isMineOrder(o) && o.side === side).length >= 1) {
     return { reason: `already have a ${side} (max 1 per side)` };
   }
-  if (state.orders.length >= 2) {
+  if (state.orders.filter(isMineOrder).length >= 2) {
     return { reason: "max 2 working bot orders" };
   }
 

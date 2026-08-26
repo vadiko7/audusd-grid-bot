@@ -582,6 +582,35 @@ describe("engine cycle", () => {
     assert.ok(s.actions.some((a) => a.type === "cancel"));
   });
 
+  it("cancels working orders outside 1.25× proximity of mark and recenters ±1", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
+    const last = 2.9032;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: 210.24, entry: 2.85 };
+    const farBuy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const nearSell = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 2.9077,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 210.24, entry: 2.85 },
+        positionNotional: 608,
+        orders: [
+          { id: "b", side: "buy", price: farBuy, qty: 8.6, notional: 25, placedAt: 1, mine: true },
+          { id: "s", side: "sell", price: nearSell, qty: 8.6, notional: 25, placedAt: 1, mine: true },
+        ],
+      }),
+    });
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 2.9077) < 1e-4);
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "b"));
+    const buy = downLevel(s.lastFillPrice, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-4));
+  });
+
   it("with lastFill and no bot orders, places the missing ±1", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;

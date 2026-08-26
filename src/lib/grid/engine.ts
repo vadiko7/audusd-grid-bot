@@ -390,6 +390,53 @@ function emit(state: EngineState, action: EngineAction) {
   }
 }
 
+function markProxPct(state: EngineState): number {
+  return proximityPct(state.spacingPct, state.config.market);
+}
+
+function outsideMarkProximity(state: EngineState, price: number): boolean {
+  if (state.mark <= 0 || price <= 0) return false;
+  return !inProximity(price, state.mark, markProxPct(state));
+}
+
+function dropFarFromMark(state: EngineState) {
+  if (state.mark <= 0) return;
+  const prox = markProxPct(state);
+  const keep: GridOrder[] = [];
+  for (const order of state.orders) {
+    if (isMineOrder(order) && outsideMarkProximity(state, order.price)) {
+      dropOrder(
+        state,
+        order,
+        `outside ${prox.toFixed(2)}% proximity of mark ${state.mark.toFixed(state.config.market.priceDecimals)}`,
+      );
+      continue;
+    }
+    keep.push(order);
+  }
+  state.orders = keep;
+}
+
+function snapLastFillIfOutsideProximity(state: EngineState): boolean {
+  if (state.mark <= 0 || !state.config.armed) return false;
+  const m = state.config.market;
+  const prox = markProxPct(state);
+  const farOrders = state.orders.filter((o) => isMineOrder(o) && outsideMarkProximity(state, o.price));
+  if (farOrders.length === 0) return false;
+  const px = roundPrice(state.mark, m.priceDecimals);
+  const anchor = fillAnchor(state);
+  if (anchor) {
+    pushLog(
+      state,
+      "clean",
+      `lastFill snap ${anchor.toFixed(m.priceDecimals)} → mark ${px.toFixed(m.priceDecimals)} (${farOrders.length} working outside ${prox.toFixed(2)}% proximity)`,
+    );
+  }
+  state.lastFillPrice = px;
+  state.lastFillAt = state.now;
+  return true;
+}
+
 function hasNear(state: EngineState, target: number, side?: Side): boolean {
   return state.orders.some(
     (o) => (!side || o.side === side) && sameRung(o.price, target, state.factor),
@@ -416,6 +463,13 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
 
   if (hasNear(state, target, side)) {
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
+  }
+
+  if (outsideMarkProximity(state, target)) {
+    return {
+      reason: `outside ${markProxPct(state).toFixed(2)}% proximity of mark ${state.mark.toFixed(5)}`,
+      extra: { target, mark: state.mark },
+    };
   }
 
   if (state.impulse !== "none") {
@@ -755,6 +809,7 @@ export function setArmed(state: EngineState, armed: boolean): EngineState {
   if (armed) {
     pushLog(state, "info", "armed — restore ±1 around last fill");
     if (state.accountSource === "live") {
+      snapLastFillIfOutsideProximity(state);
       cleanInvalid(state);
       maintainPair(state, "arm restore ±1");
     }
@@ -835,7 +890,7 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(
       state,
       "impulse",
-      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% (2× spacing) — clean leftover bot limits, ±1 only`,
+      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% — clean leftover bot limits, ±1 only`,
     );
     return;
   }
@@ -912,13 +967,20 @@ function runArmedCycle(state: EngineState) {
     postFillMissed(state, latest);
   }
 
+  let walked: Fill | null = null;
   if (state.fillsThisCycle.length === 0) {
     if (state.impulseJustCooled) impulseCoolCatch(state);
     else if (state.accountSource === "live" && state.impulse === "none") {
-      const walked = walkCrossedLevels(state);
+      walked = walkCrossedLevels(state);
       if (walked) postFillMissed(state, walked);
     }
   }
+
+  if (!walked && !state.impulseJustCooled) {
+    snapLastFillIfOutsideProximity(state);
+  }
+  dropFarFromMark(state);
+  if (fillAnchor(state)) cleanInvalid(state);
 
   if (!waitFill) maintainPair(state, "maintain ±1");
 }

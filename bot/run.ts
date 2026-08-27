@@ -141,11 +141,19 @@ function adoptOrders(book: { owned: Owned; market: { symbol: string } }, liveOrd
   book.owned = pruneOwned(book.owned, now);
   const ids = new Map(book.owned.ids.map((x) => [x.id, x.at]));
   const clients = new Map(book.owned.clients.map((x) => [x.n, x.at]));
+  const liveByClient = new Map<number, number>();
   for (const o of liveOrders) {
-    if (o.clientOrderIndex != null && clients.has(o.clientOrderIndex)) {
-      ids.set(o.id, now);
-      clients.set(o.clientOrderIndex, now);
-    }
+    if (o.clientOrderIndex == null) continue;
+    liveByClient.set(o.clientOrderIndex, (liveByClient.get(o.clientOrderIndex) ?? 0) + 1);
+  }
+  for (const o of liveOrders) {
+    if (o.clientOrderIndex == null) continue;
+    if (!clients.has(o.clientOrderIndex)) continue;
+    if ((liveByClient.get(o.clientOrderIndex) ?? 0) !== 1) continue;
+    ids.set(o.id, now);
+    clients.set(o.clientOrderIndex, now);
+  }
+  for (const o of liveOrders) {
     if (ids.has(o.id)) ids.set(o.id, now);
   }
   book.owned = pruneOwned({
@@ -333,6 +341,10 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     if (action.type !== "cancel") continue;
     if (action.orderId.startsWith("pending:")) continue;
     if (book.giveUp.has(action.orderId)) continue;
+    if (book.manuals.some((o) => o.id === action.orderId) || !isMine(book.owned, { id: action.orderId })) {
+      log(`${m.symbol} skip cancel ${action.orderId} — not a bot order`);
+      continue;
+    }
     const result = await cancelViaPython(m.marketId, action.orderId);
     if (result === "ok") {
       log(`${m.symbol} tx cancel ${action.side} ${action.price.toFixed(m.priceDecimals)} ${action.orderId}`);

@@ -371,7 +371,9 @@ function emit(state: EngineState, action: EngineAction) {
   state.actions = [...state.actions, action];
   if (action.type === "cancel") state.cancelSentAt[action.orderId] = state.now;
   if (action.type === "cancel_all") {
-    for (const o of state.orders) state.cancelSentAt[o.id] = state.now;
+    for (const o of state.orders) {
+      if (isMineOrder(o)) state.cancelSentAt[o.id] = state.now;
+    }
   }
 }
 
@@ -621,23 +623,13 @@ function postFillMissed(state: EngineState, fill: Fill) {
   const down = downLevel(fill.price, state.factor, m.priceDecimals);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
+    if (!isMineOrder(order)) {
+      keep.push(order);
+      continue;
+    }
     const belongs = sameRung(order.price, up, state.factor) || sameRung(order.price, down, state.factor);
     if (belongs) keep.push(order);
-    else if (!state.cancelledIds.includes(order.id)) {
-      state.cancelledIds.push(order.id);
-      emit(state, {
-        type: "cancel",
-        orderId: order.id,
-        side: order.side,
-        price: order.price,
-        why: "old level after fill",
-      });
-      pushLog(
-        state,
-        "clean",
-        `clean ${order.side.toUpperCase()} ${order.price.toFixed(m.priceDecimals)} — old level after fill (keep ±1 ${down.toFixed(m.priceDecimals)} / ${up.toFixed(m.priceDecimals)})`,
-      );
-    }
+    else dropOrder(state, order, "old level after fill");
   }
   state.orders = keep;
   if (state.impulse !== "none") {

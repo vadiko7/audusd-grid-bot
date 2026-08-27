@@ -635,6 +635,43 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
   });
 
+  it("after a fill never cancels a manual leftover", () => {
+    const s = createInitialState({ startingEquity: 5000 });
+    const last = 0.7172;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.position = { size: -139.2, entry: last };
+    const sold = upLevel(last, DEFAULT_FACTOR);
+    const manualPx = 0.71008;
+    setArmed(s, true);
+    step(s, {
+      now: 1_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -139.2, entry: last },
+        positionNotional: 100,
+        orders: [
+          { id: "bot", side: "sell", price: sold, qty: 34.9, notional: 25, placedAt: 1, mine: true },
+          { id: "man", side: "buy", price: manualPx, qty: 50, notional: 35, placedAt: 1, mine: false },
+        ],
+      }),
+    });
+    s.actions = [];
+    step(s, {
+      now: 2_000,
+      mark: sold,
+      live: liveAccount({
+        equity: 500,
+        position: { size: -174.1, entry: last },
+        positionNotional: 125,
+        orders: [{ id: "man", side: "buy", price: manualPx, qty: 50, notional: 35, placedAt: 1, mine: false }],
+      }),
+    });
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "man"));
+    assert.equal(s.orders.find((o) => o.id === "man")?.id, "man");
+  });
+
   it("with lastFill and no bot orders, places the missing ±1", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;

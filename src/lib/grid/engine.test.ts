@@ -348,14 +348,13 @@ describe("engine cycle", () => {
     assert.equal(s.lastFillPrice, sold);
   });
 
-  it("NATGAS: mark through the +1 sell walks lastFill and places the next ±1", () => {
+  it("NATGAS: mark through the +1 sell is not a fill — lastFill stays until pos changes", () => {
     const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
     const last = 2.855;
     s.lastFillPrice = last;
     s.lastFillAt = 1;
     s.position = { size: 35, entry: last };
     const oldBuy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    s.orders = [{ id: "old", side: "buy", price: oldBuy, qty: 34.36, notional: 96, placedAt: 1 }];
     setArmed(s, true);
     const crossed = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
     step(s, {
@@ -365,21 +364,11 @@ describe("engine cycle", () => {
         equity: 500,
         position: { size: 35, entry: last },
         positionNotional: 100,
-        orders: [{ id: "old", side: "buy", price: oldBuy, qty: 34.36, notional: 96, placedAt: 1 }],
+        orders: [{ id: "old", side: "buy", price: oldBuy, qty: 34.36, notional: 96, placedAt: 1, mine: true }],
       }),
     });
-    assert.equal(s.lastFillPrice, crossed);
-    const nextSell = upLevel(crossed, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    const nextBuy = downLevel(crossed, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    const prices = [
-      ...s.orders.map((o) => o.price),
-      ...s.actions.filter((a) => a.type === "place").map((a) => a.price),
-    ];
-    assert.ok(prices.some((p) => Math.abs(p - nextSell) < 1e-6), `need sell ${nextSell} got ${prices}`);
-    assert.ok(prices.some((p) => Math.abs(p - nextBuy) < 1e-6), `need buy ${nextBuy} got ${prices}`);
-    assert.ok(!prices.some((p) => Math.abs(p - crossed) < 1e-6));
-    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
-    assert.ok(!s.logs.some((l) => l.message.includes("marketable sell")));
+    assert.equal(s.lastFillPrice, last);
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
   });
 
   it("pending ghost does not log order-gone and expires so ±1 can re-place", () => {
@@ -514,7 +503,7 @@ describe("engine cycle", () => {
     assert.equal(s.orders.find((o) => o.id === "onfill")?.id, "onfill");
   });
 
-  it("open position with no saved lastFill resumes at mark and places ±1", () => {
+  it("open position with no saved lastFill waits for a fill — does not seed from mark", () => {
     const s = createInitialState({ startingEquity: 5000 });
     s.lastFillPrice = null;
     setArmed(s, true);
@@ -528,15 +517,11 @@ describe("engine cycle", () => {
         orders: [],
       }),
     });
-    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 0.71729) < 1e-4);
-    const buy = downLevel(s.lastFillPrice, DEFAULT_FACTOR);
-    const sell = upLevel(s.lastFillPrice, DEFAULT_FACTOR);
-    const places = s.actions.filter((a) => a.type === "place");
-    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
-    assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
+    assert.equal(s.lastFillPrice, null);
+    assert.ok(!s.actions.some((a) => a.type === "place"));
   });
 
-  it("stale lastFill snaps to mark and restores ±1 off the filled price", () => {
+  it("stale lastFill is not snapped to mark — ±1 stays around the fill", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;
     s.lastFillPrice = last;
@@ -545,51 +530,35 @@ describe("engine cycle", () => {
     setArmed(s, true);
     step(s, {
       now: 120_000,
-      mark: 0.71802,
+      mark: 0.71725,
       live: liveAccount({
         equity: 500,
         position: { size: -1533.8, entry: last },
         positionNotional: 1100,
         orders: [
-          {
-            id: "oldb",
-            side: "buy",
-            price: 0.71363,
-            qty: 34.8,
-            notional: 25,
-            placedAt: 1,
-            mine: true,
-          },
-          {
-            id: "olds",
-            side: "sell",
-            price: 0.72079,
-            qty: 34.8,
-            notional: 25,
-            placedAt: 1,
-            mine: true,
-          },
+          { id: "oldb", side: "buy", price: 0.71363, qty: 34.8, notional: 25, placedAt: 1, mine: true },
+          { id: "olds", side: "sell", price: 0.72079, qty: 34.8, notional: 25, placedAt: 1, mine: true },
         ],
       }),
     });
-    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 0.71802) < 1e-4);
-    const buy = downLevel(s.lastFillPrice, DEFAULT_FACTOR);
-    const sell = upLevel(s.lastFillPrice, DEFAULT_FACTOR);
+    assert.equal(s.lastFillPrice, last);
+    const buy = downLevel(last, DEFAULT_FACTOR);
+    const sell = upLevel(last, DEFAULT_FACTOR);
     const places = s.actions.filter((a) => a.type === "place");
     assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
     assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
-    assert.ok(!places.some((a) => Math.abs(a.price - last) < 1e-4));
-    assert.ok(s.actions.some((a) => a.type === "cancel"));
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "oldb"));
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "olds"));
   });
 
-  it("cancels working orders outside 1.25× proximity of mark and recenters ±1", () => {
+  it("keeps lastFill when mark drifts — does not recenter on mark", () => {
     const s = createInitialState({ market: NATGAS, startingEquity: 5000 });
     const last = 2.9032;
     s.lastFillPrice = last;
     s.lastFillAt = 1;
     s.position = { size: 210.24, entry: 2.85 };
-    const farBuy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    const nearSell = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const buy = downLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    const sell = upLevel(last, NATGAS.defaultFactor, NATGAS.priceDecimals);
     setArmed(s, true);
     step(s, {
       now: 2_000,
@@ -599,16 +568,15 @@ describe("engine cycle", () => {
         position: { size: 210.24, entry: 2.85 },
         positionNotional: 608,
         orders: [
-          { id: "b", side: "buy", price: farBuy, qty: 8.6, notional: 25, placedAt: 1, mine: true },
-          { id: "s", side: "sell", price: nearSell, qty: 8.6, notional: 25, placedAt: 1, mine: true },
+          { id: "b", side: "buy", price: buy, qty: 8.6, notional: 25, placedAt: 1, mine: true },
+          { id: "s", side: "sell", price: sell, qty: 8.6, notional: 25, placedAt: 1, mine: true },
         ],
       }),
     });
-    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 2.9077) < 1e-4);
-    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "b"));
-    const buy = downLevel(s.lastFillPrice, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    const places = s.actions.filter((a) => a.type === "place");
-    assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-4));
+    assert.equal(s.lastFillPrice, last);
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "b"));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "s"));
+    assert.ok(!s.actions.some((a) => a.type === "place"));
   });
 
   it("does not place a duplicate on a rung that already has any order", () => {

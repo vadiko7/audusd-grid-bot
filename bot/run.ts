@@ -14,6 +14,7 @@ import {
   step,
 } from "../src/lib/grid/engine.ts";
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
+import { sameRung, baseQty } from "../src/lib/grid/math.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
 
@@ -68,26 +69,34 @@ type SavedSettings = {
   orderNotional?: number;
 };
 type Owned = {
+  v: 2;
   ids: Array<{ id: string; at: number }>;
   clients: Array<{ n: number; at: number }>;
+  skip: Array<{ id: string; at: number }>;
 };
 
 function nowMs() {
   return Date.now();
 }
 
+function emptyOwned(): Owned {
+  return { v: 2, ids: [], clients: [], skip: [] };
+}
+
 function pruneOwned(owned: Owned, now = nowMs()): Owned {
   const cut = now - OWNED_TTL_MS;
   return {
+    v: 2,
     ids: owned.ids.filter((x) => x.at > cut),
     clients: owned.clients.filter((x) => x.at > cut).slice(-200),
+    skip: (owned.skip ?? []).filter((x) => x.at > cut).slice(-500),
   };
 }
 
 function coerceOwned(raw: unknown): Owned {
-  const empty: Owned = { ids: [], clients: [] };
-  if (!raw || typeof raw !== "object") return empty;
-  const o = raw as { ids?: unknown; clients?: unknown };
+  if (!raw || typeof raw !== "object") return emptyOwned();
+  const o = raw as { v?: unknown; ids?: unknown; clients?: unknown; skip?: unknown };
+  if (o.v !== 2) return emptyOwned();
   const ids: Owned["ids"] = [];
   if (Array.isArray(o.ids)) {
     for (const x of o.ids) {
@@ -108,7 +117,17 @@ function coerceOwned(raw: unknown): Owned {
       }
     }
   }
-  return pruneOwned({ ids, clients });
+  const skip: Owned["skip"] = [];
+  if (Array.isArray(o.skip)) {
+    for (const x of o.skip) {
+      if (typeof x === "string") skip.push({ id: x, at: nowMs() });
+      else if (x && typeof x === "object" && typeof (x as { id?: unknown }).id === "string") {
+        const at = Number((x as { at?: unknown }).at);
+        skip.push({ id: (x as { id: string }).id, at: Number.isFinite(at) ? at : nowMs() });
+      }
+    }
+  }
+  return pruneOwned({ v: 2, ids, clients, skip });
 }
 
 function loadOwned(): Record<string, Owned> {
@@ -130,35 +149,64 @@ function saveOwned() {
   writeFileSync(OWNED_PATH, `${JSON.stringify(dump, null, 2)}\n`);
 }
 
-function isMine(owned: Owned, order: { id: string; clientOrderIndex?: number }): boolean {
-  if (owned.ids.some((x) => x.id === order.id)) return true;
-  if (order.clientOrderIndex != null && owned.clients.some((x) => x.n === order.clientOrderIndex)) return true;
-  return false;
+function isMine(owned: Owned, order: { id: string }): boolean {
+  return owned.ids.some((x) => x.id === order.id);
 }
 
-function adoptOrders(book: { owned: Owned; market: { symbol: string } }, liveOrders: { id: string; clientOrderIndex?: number }[]) {
+function isSkipped(owned: Owned, id: string): boolean {
+  return owned.skip.some((x) => x.id === id);
+}
+
+function gridSized(order: { price: number; qty: number; notional: number }, notional: number, sizeDecimals: number): boolean {
+  if (!(notional > 0) || !(order.price > 0)) return false;
+  const nOk = Math.abs(order.notional - notional) / notional <= 0.3;
+  const expect = baseQty(order.price, notional, sizeDecimals);
+  const qOk = expect > 0 && Math.abs(order.qty - expect) / expect <= 0.3;
+  return nOk && qOk;
+}
+
+function adoptOrders(book: Book, liveOrders: GridOrder[]) {
   const now = nowMs();
   book.owned = pruneOwned(book.owned, now);
   const ids = new Map(book.owned.ids.map((x) => [x.id, x.at]));
   const clients = new Map(book.owned.clients.map((x) => [x.n, x.at]));
+  const skip = new Map(book.owned.skip.map((x) => [x.id, x.at]));
+  const pending = book.engine.orders.filter((o) => o.id.startsWith("pending:"));
   const liveByClient = new Map<number, number>();
   for (const o of liveOrders) {
     if (o.clientOrderIndex == null) continue;
     liveByClient.set(o.clientOrderIndex, (liveByClient.get(o.clientOrderIndex) ?? 0) + 1);
   }
   for (const o of liveOrders) {
-    if (o.clientOrderIndex == null) continue;
-    if (!clients.has(o.clientOrderIndex)) continue;
-    if ((liveByClient.get(o.clientOrderIndex) ?? 0) !== 1) continue;
-    ids.set(o.id, now);
-    clients.set(o.clientOrderIndex, now);
-  }
-  for (const o of liveOrders) {
-    if (ids.has(o.id)) ids.set(o.id, now);
+    if (ids.has(o.id)) {
+      ids.set(o.id, now);
+      continue;
+    }
+    if (skip.has(o.id)) {
+      skip.set(o.id, now);
+      continue;
+    }
+    const sized = gridSized(o, book.engine.config.orderNotional, book.market.sizeDecimals);
+    const pendingHit = pending.some(
+      (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor) && Math.abs(p.qty - o.qty) / Math.max(p.qty, 1e-9) <= 0.3,
+    );
+    const clientHit =
+      sized &&
+      o.clientOrderIndex != null &&
+      clients.has(o.clientOrderIndex) &&
+      (liveByClient.get(o.clientOrderIndex) ?? 0) === 1;
+    if ((pendingHit && sized) || clientHit || sized) {
+      ids.set(o.id, now);
+      if (o.clientOrderIndex != null) clients.set(o.clientOrderIndex, now);
+      continue;
+    }
+    skip.set(o.id, now);
   }
   book.owned = pruneOwned({
+    v: 2,
     ids: [...ids.entries()].map(([id, at]) => ({ id, at })),
     clients: [...clients.entries()].map(([n, at]) => ({ n, at })),
+    skip: [...skip.entries()].map(([id, at]) => ({ id, at })),
   }, now);
   saveOwned();
 }
@@ -244,7 +292,7 @@ function makeBook(market: MarketProfile): Book {
     const at = Number(saved.markets?.[market.symbol]?.lastFillAt);
     if (Number.isFinite(at) && at > 0) engine.lastFillAt = at;
   }
-  const persisted = loadOwned()[market.symbol] ?? { ids: [], clients: [] };
+  const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
 
@@ -341,7 +389,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     if (action.type !== "cancel") continue;
     if (action.orderId.startsWith("pending:")) continue;
     if (book.giveUp.has(action.orderId)) continue;
-    if (book.manuals.some((o) => o.id === action.orderId) || !isMine(book.owned, { id: action.orderId })) {
+    if (book.manuals.some((o) => o.id === action.orderId) || isSkipped(book.owned, action.orderId) || !isMine(book.owned, { id: action.orderId })) {
       log(`${m.symbol} skip cancel ${action.orderId} — not a bot order`);
       continue;
     }

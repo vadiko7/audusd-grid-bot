@@ -446,6 +446,7 @@ function hasNear(state: EngineState, target: number, side?: Side): boolean {
   return state.orders.some((o) => {
     if (side && o.side !== side) return false;
     if (sameRung(o.price, target, state.factor)) return true;
+    if (!isMineOrder(o)) return false;
     return isAccumulate(state) && inProximity(o.price, target, prox);
   });
 }
@@ -767,10 +768,22 @@ function recenter(state: EngineState, reason: string) {
 export function maintainPair(state: EngineState, why: string) {
   if (!state.config.armed) return;
   if (!fillAnchor(state)) {
-    if (!state.logs.some((l) => l.message.includes("no lastFill"))) {
-      pushLog(state, "gate", "no lastFill — waiting for a fill before placing ±1");
+    if (isAccumulate(state) && state.mark > 0) {
+      const px = roundPrice(state.mark, state.config.market.priceDecimals);
+      state.lastFillPrice = px;
+      state.lastFillAt = state.now;
+      ratchetHighest(state, px, "first-run seed from mark");
+      pushLog(
+        state,
+        "info",
+        `lastFill seeded from mark ${px.toFixed(state.config.market.priceDecimals)} (first run — place −1)`,
+      );
+    } else {
+      if (!state.logs.some((l) => l.message.includes("no lastFill"))) {
+        pushLog(state, "gate", "no lastFill — waiting for a fill before placing ±1");
+      }
+      return;
     }
-    return;
   }
   if (isAccumulate(state)) {
     const m = state.config.market;

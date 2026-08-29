@@ -1168,4 +1168,41 @@ describe("SPCX accumulate", () => {
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "sell" && a.reduceOnly));
   });
+
+  it("first run with no lastFill seeds from mark and places −1 buy", () => {
+    const s = createInitialState({ market: TSLA, startingEquity: 500 });
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 350.42,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 0, entry: 0 },
+        orders: [],
+      }),
+    });
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 350.42) < 0.02);
+    const buy = downLevel(s.lastFillPrice, TSLA.defaultFactor, TSLA.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
+  });
+
+  it("manual leftover at mark does not block the first −1 buy", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 500 });
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 140.75,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 0, entry: 0 },
+        orders: [
+          { id: "manual", side: "buy", price: 140.73, qty: 0.18, notional: 25, placedAt: 1, mine: false },
+        ],
+      }),
+    });
+    const buy = downLevel(s.lastFillPrice ?? 140.75, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "manual"));
+  });
 });

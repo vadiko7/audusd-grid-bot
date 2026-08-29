@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { NATGAS } from "./markets.ts";
+import { NATGAS, SPCX } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -10,6 +10,8 @@ import {
   setOrderNotional,
   snapshotPublic,
   step,
+  buyCapUsd,
+  buyUsedUsd,
 } from "./engine.ts";
 import { baseQty, downLevel, factorFromSpacing, roundPrice, upLevel } from "./math.ts";
 import { classifyRegime, spacingFromAtr } from "./atr.ts";
@@ -960,5 +962,144 @@ describe("engine cycle", () => {
     assert.equal(snap.bias, "flat");
     assert.equal(snap.levels.sell, upLevel(0.72, factorFromSpacing(snap.spacingPct)));
     assert.equal(snap.armed, true);
+  });
+});
+
+describe("SPCX accumulate", () => {
+  it("blocks new buys at equity × 3 and still places a +PnL reduce-only sell", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 500 });
+    const last = 140;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 11, entry: 138 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 140.2,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 11, entry: 138 },
+        positionNotional: 1542,
+        orders: [],
+      }),
+    });
+    const places = s.actions.filter((a) => a.type === "place");
+    assert.ok(!places.some((a) => a.side === "buy"));
+    const sell = places.find((a) => a.side === "sell");
+    assert.ok(sell);
+    assert.equal(sell.reduceOnly, true);
+    assert.ok(buyUsedUsd(s) >= buyCapUsd(s));
+  });
+
+  it("sells 25% at/above highest_lvl and 90% below, never shorts", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    const last = 138;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 5, entry: 137 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 138.1,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 5, entry: 137 },
+        positionNotional: 690,
+        orders: [],
+      }),
+    });
+    const sell = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sell);
+    const px = upLevel(last, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(Math.abs(sell.price - px) < 1e-9);
+    const expectUsd = 25 * 0.9;
+    assert.ok(Math.abs(sell.qty * sell.price - expectUsd) / expectUsd < 0.35);
+    assert.equal(sell.reduceOnly, true);
+
+    const flat = createInitialState({ market: SPCX, startingEquity: 5000 });
+    flat.lastFillPrice = 140;
+    flat.lastFillAt = 1;
+    setArmed(flat, true);
+    step(flat, {
+      now: 2_000,
+      mark: 140.2,
+      live: liveAccount({ equity: 2000, position: { size: 0, entry: 0 }, orders: [] }),
+    });
+    assert.ok(!flat.actions.some((a) => a.type === "place" && a.side === "sell"));
+  });
+
+  it("ratchets highest_lvl up on fill and never down", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    s.highestLvl = 140;
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.position = { size: 2, entry: 139 };
+    const sellPx = upLevel(140, SPCX.defaultFactor, SPCX.priceDecimals);
+    setArmed(s, true);
+    step(s, {
+      now: 1_000,
+      mark: 140.2,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 2, entry: 139 },
+        positionNotional: 280,
+        orders: [{ id: "s", side: "sell", price: sellPx, qty: 0.07, notional: 10, placedAt: 1, mine: true }],
+      }),
+    });
+    step(s, {
+      now: 2_000,
+      mark: 141.5,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 1.93, entry: 139 },
+        positionNotional: 273,
+        orders: [],
+      }),
+    });
+    assert.ok((s.highestLvl ?? 0) >= 140);
+    const hi = s.highestLvl!;
+    step(s, {
+      now: 3_000,
+      mark: 138,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 1.93, entry: 139 },
+        positionNotional: 266,
+        orders: [],
+      }),
+    });
+    assert.equal(s.highestLvl, hi);
+  });
+
+  it("buy impulse harvests reduce-only sells and blocks new buys", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    const last = 140;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    const t0 = 10_000;
+    s.markHistory = [
+      { t: t0, p: 137.5 },
+      { t: t0 + 50_000, p: 140.2 },
+    ];
+    setArmed(s, true);
+    step(s, {
+      now: t0 + 50_000,
+      mark: 140.2,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 560,
+        orders: [],
+      }),
+    });
+    assert.equal(s.impulse, "buy");
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
+    const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sells.length >= 1);
+    assert.ok(sells.every((a) => a.reduceOnly));
   });
 });

@@ -97,6 +97,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     foreignMargin: 0,
     cancelSentAt: {},
     unackedPosDelta: 0,
+    highestLvl: null,
   };
 }
 
@@ -132,6 +133,62 @@ export function isFlat(state: EngineState, mark = state.mark): boolean {
 export function bias(state: EngineState): "short" | "long" | "flat" {
   if (isFlat(state)) return "flat";
   return state.position.size < 0 ? "short" : "long";
+}
+
+export function isAccumulate(state: EngineState): boolean {
+  return state.config.market.strategy === "accumulate";
+}
+
+export function buyCapUsd(state: EngineState): number {
+  const mult = state.config.market.buyCapEquityMult ?? 3;
+  return Math.max(0, equity(state) * mult);
+}
+
+export function pendingBuyNotional(state: EngineState): number {
+  return state.orders
+    .filter((o) => isMineOrder(o) && o.side === "buy")
+    .reduce((sum, o) => sum + o.notional, 0);
+}
+
+export function buyUsedUsd(state: EngineState, mark = state.mark): number {
+  const longN = state.position.size > 0 ? state.position.size * mark : 0;
+  return longN + pendingBuyNotional(state);
+}
+
+export function underBuyCap(state: EngineState, extra = 0): boolean {
+  return buyUsedUsd(state) + extra + 1e-9 < buyCapUsd(state);
+}
+
+function accumulateProxPct(state: EngineState): number {
+  return Math.max(state.config.market.proximityMinPct, markProxPct(state));
+}
+
+function ratchetHighest(state: EngineState, price: number, why: string) {
+  if (!(price > 0)) return;
+  const px = roundPrice(price, state.config.market.priceDecimals);
+  if (state.highestLvl != null && px <= state.highestLvl + 1e-12) return;
+  const prev = state.highestLvl;
+  state.highestLvl = px;
+  pushLog(
+    state,
+    "info",
+    `highest_lvl ${prev == null ? "set" : "ratchet"} ${prev == null ? "" : `${prev.toFixed(state.config.market.priceDecimals)} → `}${px.toFixed(state.config.market.priceDecimals)} (${why})`,
+  );
+}
+
+function sellTicketUsd(state: EngineState, price: number): number {
+  const m = state.config.market;
+  const ticket = state.config.orderNotional;
+  const hi = state.highestLvl;
+  const frac =
+    hi != null && price + 1e-12 >= hi ? (m.harvestSellFrac ?? 0.25) : (m.reloadSellFrac ?? 0.9);
+  return Math.max(ticket * frac, m.minQuoteNotional ?? 10);
+}
+
+function plusPnlSell(state: EngineState, price: number): boolean {
+  const entry = state.position.entry;
+  if (!(entry > 0) || isFlat(state)) return false;
+  return price > entry;
 }
 
 function fillAnchor(state: EngineState): number | null {
@@ -224,6 +281,7 @@ function applyFill(state: EngineState, fill: Fill) {
   state.lastFillPrice = fill.price;
   state.lastFillSide = fill.side;
   state.lastFillAt = fill.ts;
+  if (isAccumulate(state)) ratchetHighest(state, fill.price, "fill");
   pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
     side: fill.side,
     price: fill.price,
@@ -293,6 +351,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     state.lastFillPrice = latest.price;
     state.lastFillSide = latest.side;
     state.lastFillAt = latest.ts;
+    if (isAccumulate(state)) ratchetHighest(state, latest.price, "fill");
     for (const fill of state.fillsThisCycle) {
       pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
         side: fill.side,
@@ -382,14 +441,18 @@ function markProxPct(state: EngineState): number {
 }
 
 function hasNear(state: EngineState, target: number, side?: Side): boolean {
-  return state.orders.some(
-    (o) => (!side || o.side === side) && sameRung(o.price, target, state.factor),
-  );
+  const prox = isAccumulate(state) ? accumulateProxPct(state) : 0;
+  return state.orders.some((o) => {
+    if (side && o.side !== side) return false;
+    if (sameRung(o.price, target, state.factor)) return true;
+    return isAccumulate(state) && inProximity(o.price, target, prox);
+  });
 }
 
 type GateFail = { reason: string; extra?: Record<string, string | number | boolean> };
+type PlaceOpts = { qty?: number; reduceOnly?: boolean; allowImpulse?: boolean; allowExtra?: boolean };
 
-function gateCandidate(state: EngineState, side: Side, target: number): GateFail | null {
+function gateCandidate(state: EngineState, side: Side, target: number, opts: PlaceOpts = {}): GateFail | null {
   if (!state.config.armed) return { reason: "disarmed" };
   if (state.accountSource === "none") return { reason: "no live account" };
   if (state.pauseNewOpens) {
@@ -397,10 +460,37 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
   }
   if (state.mark <= 0) return { reason: "no mark" };
 
+  const acc = isAccumulate(state);
+  const ticket = state.config.orderNotional;
+
+  if (acc && side === "sell") {
+    if (isFlat(state) || state.position.size <= 0) return { reason: "flat — no sells (no shorts)" };
+    const atCap = !underBuyCap(state);
+    if (atCap && !plusPnlSell(state, target)) {
+      return { reason: `buy-cap — sell only +PnL above entry ${state.position.entry.toFixed(state.config.market.priceDecimals)}` };
+    }
+  }
+
+  if (acc && side === "buy") {
+    if (state.position.size < -1e-9) return { reason: "no shorts — will not buy into a short" };
+    if (!underBuyCap(state, ticket)) {
+      return {
+        reason: `buy cap ${buyUsedUsd(state).toFixed(0)} ≥ ${buyCapUsd(state).toFixed(0)} (equity×${state.config.market.buyCapEquityMult ?? 3})`,
+        extra: { buyUsed: buyUsedUsd(state), buyCap: buyCapUsd(state) },
+      };
+    }
+  }
+
   const remaining = remainingCapacity(state);
-  if (remaining < state.config.orderNotional) {
+  if (side === "buy" && remaining < ticket) {
     return {
-      reason: `remaining ${remaining.toFixed(0)} < ${state.config.orderNotional}`,
+      reason: `remaining ${remaining.toFixed(0)} < ${ticket}`,
+      extra: { remaining },
+    };
+  }
+  if (!acc && remaining < ticket) {
+    return {
+      reason: `remaining ${remaining.toFixed(0)} < ${ticket}`,
       extra: { remaining },
     };
   }
@@ -409,22 +499,33 @@ function gateCandidate(state: EngineState, side: Side, target: number): GateFail
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
   }
 
-  if (state.impulse !== "none") {
-    return {
-      reason: `impulse ${state.impulse} — freeze new limits until cool (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
-      extra: { delta: state.impulseDeltaPct, impulse: state.impulse },
-    };
+  if (state.impulse !== "none" && !opts.allowImpulse) {
+    if (acc) {
+      if (side === "buy") {
+        return {
+          reason: `impulse ${state.impulse} — no new buys (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
+          extra: { delta: state.impulseDeltaPct, impulse: state.impulse },
+        };
+      }
+    } else {
+      return {
+        reason: `impulse ${state.impulse} — freeze new limits until cool (Δ ${state.impulseDeltaPct.toFixed(3)}%)`,
+        extra: { delta: state.impulseDeltaPct, impulse: state.impulse },
+      };
+    }
   }
 
   if (state.lastFillPrice && sameRung(target, state.lastFillPrice, state.factor)) {
     return { reason: `just-filled level ${target.toFixed(5)}` };
   }
 
-  if (state.orders.filter((o) => isMineOrder(o) && o.side === side).length >= 1) {
-    return { reason: `already have a ${side} (max 1 per side)` };
-  }
-  if (state.orders.filter(isMineOrder).length >= 2) {
-    return { reason: "max 2 working bot orders" };
+  if (!opts.allowExtra) {
+    if (state.orders.filter((o) => isMineOrder(o) && o.side === side).length >= 1) {
+      return { reason: `already have a ${side} (max 1 per side)` };
+    }
+    if (!acc && state.orders.filter(isMineOrder).length >= 2) {
+      return { reason: "max 2 working bot orders" };
+    }
   }
 
   if (isFlat(state) && side !== (state.config.market.prefer === "long" ? "buy" : "sell")) {
@@ -472,17 +573,25 @@ function expectedFillPnl(state: EngineState, side: Side, price: number, qty: num
   };
 }
 
-function placeLimit(state: EngineState, side: Side, target: number, why: string): boolean {
+function placeLimit(state: EngineState, side: Side, target: number, why: string, opts: PlaceOpts = {}): boolean {
   const m = state.config.market;
   const price = roundPrice(target, m.priceDecimals);
-  const fail = gateCandidate(state, side, price);
+  const fail = gateCandidate(state, side, price, opts);
   if (fail) {
     if (fail.reason !== "disarmed" && fail.reason !== "no live account") {
       pushLog(state, "gate", `gate ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} — ${fail.reason}`, fail.extra);
     }
     return false;
   }
-  const qty = baseQty(state.mark, state.config.orderNotional, m.sizeDecimals);
+  let qty = opts.qty ?? baseQty(state.mark, state.config.orderNotional, m.sizeDecimals);
+  let reduceOnly = Boolean(opts.reduceOnly);
+  if (isAccumulate(state) && side === "sell") {
+    const usd = sellTicketUsd(state, price);
+    qty = opts.qty ?? baseQty(price, usd, m.sizeDecimals);
+    reduceOnly = true;
+    const maxClose = Math.abs(state.position.size);
+    if (qty > maxClose) qty = roundQty(maxClose, m.sizeDecimals);
+  }
   if (qty <= 0) {
     pushLog(state, "gate", "gate — base_qty is 0");
     return false;
@@ -497,7 +606,7 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string)
     mine: true,
   };
   state.orders = [...state.orders, order];
-  emit(state, { type: "place", side, price, qty, why });
+  emit(state, { type: "place", side, price, qty, why, reduceOnly: reduceOnly || undefined });
   const expect = expectedFillPnl(state, side, price, qty);
   const px = price.toFixed(m.priceDecimals);
   const q = qty.toFixed(m.sizeDecimals);
@@ -547,8 +656,68 @@ function dropOrder(state: EngineState, order: GridOrder, why: string) {
   );
 }
 
+function accumulateTargets(state: EngineState): { side: Side; price: number }[] {
+  if (!fillAnchor(state)) return [];
+  const levels = validLevels(state);
+  const m = state.config.market;
+  const out: { side: Side; price: number }[] = [];
+  const buysOk = state.impulse === "none" && underBuyCap(state);
+  if (buysOk) out.push({ side: "buy", price: levels.buy });
+  if (!isFlat(state) && state.position.size > 0) {
+    out.push({ side: "sell", price: levels.sell });
+    if (state.impulse === "buy") {
+      let px = levels.sell;
+      for (let i = 0; i < 5; i++) {
+        px = upLevel(px, state.factor, m.priceDecimals);
+        if (px <= state.mark) continue;
+        if (!plusPnlSell(state, px)) continue;
+        out.push({ side: "sell", price: px });
+      }
+    }
+  }
+  return out;
+}
+
+function harvestRipSells(state: EngineState) {
+  if (!isAccumulate(state) || state.impulse !== "buy") return;
+  if (isFlat(state) || state.position.size <= 0) return;
+  const m = state.config.market;
+  const levels = validLevels(state);
+  let px = levels.sell;
+  let remaining = Math.abs(state.position.size);
+  for (const o of state.orders.filter((x) => isMineOrder(x) && x.side === "sell")) remaining -= o.qty;
+  for (let i = 0; i < 6 && remaining > 1e-6; i++) {
+    if (i > 0) px = upLevel(px, state.factor, m.priceDecimals);
+    if (px <= state.mark) continue;
+    if (!plusPnlSell(state, px)) continue;
+    if (hasNear(state, px, "sell")) continue;
+    const usd = sellTicketUsd(state, px);
+    let qty = baseQty(px, usd, m.sizeDecimals);
+    qty = roundQty(Math.min(qty, remaining), m.sizeDecimals);
+    if (qty <= 0) break;
+    if (placeLimit(state, "sell", px, "impulse harvest +PnL", { qty, reduceOnly: true, allowImpulse: true, allowExtra: true })) {
+      remaining -= qty;
+    }
+  }
+}
+
 function cleanInvalid(state: EngineState) {
   if (!fillAnchor(state)) return;
+  if (isAccumulate(state)) {
+    const allowed = accumulateTargets(state);
+    const keep: GridOrder[] = [];
+    for (const order of state.orders) {
+      if (!isMineOrder(order)) {
+        keep.push(order);
+        continue;
+      }
+      const ok = allowed.some((t) => t.side === order.side && sameRung(t.price, order.price, state.factor));
+      if (ok) keep.push(order);
+      else dropOrder(state, order, `not in allowed set (${allowed.map((t) => `${t.side[0]}${t.price.toFixed(state.config.market.priceDecimals)}`).join(" ") || "none"})`);
+    }
+    state.orders = keep;
+    return;
+  }
   const levels = validLevels(state);
   const m = state.config.market;
   const keep: GridOrder[] = [];
@@ -602,6 +771,26 @@ export function maintainPair(state: EngineState, why: string) {
     }
     return;
   }
+  if (isAccumulate(state)) {
+    const m = state.config.market;
+    const levels = validLevels(state);
+    if (state.impulse === "buy") {
+      harvestRipSells(state);
+      return;
+    }
+    const needSell = !isFlat(state) && state.position.size > 0 && !hasNear(state, levels.sell, "sell");
+    const needBuy = underBuyCap(state) && state.impulse === "none" && !hasNear(state, levels.buy, "buy");
+    if (why.startsWith("arm") || needSell || needBuy) {
+      pushLog(
+        state,
+        "info",
+        `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} hi ${state.highestLvl?.toFixed(m.priceDecimals) ?? "n/a"} cap ${buyUsedUsd(state).toFixed(0)}/${buyCapUsd(state).toFixed(0)}`,
+      );
+    }
+    if (needSell) placeLimit(state, "sell", levels.sell, why, { reduceOnly: true });
+    if (needBuy) placeLimit(state, "buy", levels.buy, why);
+    return;
+  }
   const levels = validLevels(state);
   const m = state.config.market;
   const needSell = !hasNear(state, levels.sell, "sell");
@@ -632,6 +821,22 @@ function postFillMissed(state: EngineState, fill: Fill) {
     else dropOrder(state, order, "old level after fill");
   }
   state.orders = keep;
+  if (isAccumulate(state)) {
+    if (state.impulse === "buy") {
+      harvestRipSells(state);
+      return;
+    }
+    if (state.impulse !== "none") {
+      pushLog(state, "impulse", `post-fill skip new buys until impulse cools (anchor ${fill.price.toFixed(m.priceDecimals)})`);
+      if (!isFlat(state) && !hasNear(state, up, "sell")) {
+        placeLimit(state, "sell", up, "post-fill +1", { reduceOnly: true });
+      }
+      return;
+    }
+    if (!isFlat(state) && !hasNear(state, up, "sell")) placeLimit(state, "sell", up, "post-fill +1", { reduceOnly: true });
+    if (underBuyCap(state) && !hasNear(state, down, "buy")) placeLimit(state, "buy", down, "post-fill −1");
+    return;
+  }
   if (state.impulse !== "none") {
     pushLog(state, "impulse", `post-fill skip new ±1 until impulse cools (anchor ${fill.price.toFixed(m.priceDecimals)})`);
     return;
@@ -666,7 +871,23 @@ function updateImpulse(state: EngineState, input: StepInput) {
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
       state.impulseJustCooled = true;
-      pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
+      if (isAccumulate(state)) {
+        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — −1 buy if cap allows, no dump bunch`);
+      } else {
+        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
+      }
+    } else if (isAccumulate(state) && resolved.impulse === "buy") {
+      pushLog(
+        state,
+        "impulse",
+        `impulse BUY harvest ≥25% reduce-only above — no new buys (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+      );
+    } else if (isAccumulate(state) && resolved.impulse === "sell") {
+      pushLog(
+        state,
+        "impulse",
+        `impulse SELL — block new buys, no knife-catch bunch (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+      );
     } else {
       pushLog(
         state,
@@ -766,6 +987,12 @@ function impulseCoolCatch(state: EngineState): void {
   state.impulseJustCooled = false;
   const anchor = fillAnchor(state);
   if (!anchor || state.mark <= 0 || !state.config.armed) return;
+  if (isAccumulate(state)) {
+    ratchetHighest(state, state.mark, "cool new high");
+    cleanInvalid(state);
+    pushLog(state, "impulse", "impulse cool — ±1 only (no dump buy-bunch)");
+    return;
+  }
   const m = state.config.market;
   const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
   const prox = proximityPct(state.spacingPct, m);
@@ -828,6 +1055,9 @@ function runArmedCycle(state: EngineState) {
   let waitFill = false;
   if (state.impulseJustCooled) {
     /* distance handled by impulseCoolCatch */
+  } else if (isAccumulate(state) && anchor) {
+    cleanInvalid(state);
+    if (state.impulse === "buy") harvestRipSells(state);
   } else if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
     recenter(state, `adverse ≥ ${steps} steps against short`);
     waitFill = true;
@@ -895,6 +1125,9 @@ export function snapshotPublic(state: EngineState) {
     symbol: m.symbol,
     prefer: m.prefer,
     marketId: m.marketId,
+    strategy: m.strategy,
+    priceDecimals: m.priceDecimals,
+    sizeDecimals: m.sizeDecimals,
     mark,
     equity: eq,
     remaining,
@@ -926,6 +1159,9 @@ export function snapshotPublic(state: EngineState) {
     lastFillPrice: state.lastFillPrice,
     lastFillAt: state.lastFillAt,
     lastFillSide: state.lastFillSide,
+    highestLvl: state.highestLvl,
+    buyCap: isAccumulate(state) ? buyCapUsd(state) : remaining,
+    buyUsed: isAccumulate(state) ? buyUsedUsd(state) : posN,
     levels,
     bias: bias(state),
     flat: isFlat(state),

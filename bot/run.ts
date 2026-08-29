@@ -64,7 +64,13 @@ const OWNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 type SavedSettings = {
   markets?: Record<
     string,
-    { orderNotional?: number; lastFillPrice?: number; lastFillSide?: string; lastFillAt?: number }
+    {
+      orderNotional?: number;
+      lastFillPrice?: number;
+      lastFillSide?: string;
+      lastFillAt?: number;
+      highestLvl?: number;
+    }
   >;
   orderNotional?: number;
 };
@@ -157,12 +163,21 @@ function isSkipped(owned: Owned, id: string): boolean {
   return owned.skip.some((x) => x.id === id);
 }
 
-function gridSized(order: { price: number; qty: number; notional: number }, notional: number, sizeDecimals: number): boolean {
+function gridSized(
+  order: { price: number; qty: number; notional: number },
+  notional: number,
+  sizeDecimals: number,
+  fracs: number[] = [1],
+): boolean {
   if (!(notional > 0) || !(order.price > 0)) return false;
-  const nOk = Math.abs(order.notional - notional) / notional <= 0.3;
-  const expect = baseQty(order.price, notional, sizeDecimals);
-  const qOk = expect > 0 && Math.abs(order.qty - expect) / expect <= 0.3;
-  return nOk && qOk;
+  for (const f of fracs) {
+    const usd = Math.max(notional * f, 10);
+    const nOk = Math.abs(order.notional - usd) / usd <= 0.35;
+    const expect = baseQty(order.price, usd, sizeDecimals);
+    const qOk = expect > 0 && Math.abs(order.qty - expect) / expect <= 0.35;
+    if (nOk && qOk) return true;
+  }
+  return false;
 }
 
 function adoptOrders(book: Book, liveOrders: GridOrder[]) {
@@ -186,7 +201,11 @@ function adoptOrders(book: Book, liveOrders: GridOrder[]) {
       skip.set(o.id, now);
       continue;
     }
-    const sized = gridSized(o, book.engine.config.orderNotional, book.market.sizeDecimals);
+    const sized = gridSized(o, book.engine.config.orderNotional, book.market.sizeDecimals, [
+      1,
+      book.market.harvestSellFrac ?? 0.25,
+      book.market.reloadSellFrac ?? 0.9,
+    ]);
     const pendingHit = pending.some(
       (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor) && Math.abs(p.qty - o.qty) / Math.max(p.qty, 1e-9) <= 0.3,
     );
@@ -222,7 +241,13 @@ function loadSettings(): SavedSettings {
 
 function saveSettings(book: {
   market: { symbol: string };
-  engine: { config: { orderNotional: number }; lastFillPrice: number | null; lastFillSide: string | null; lastFillAt: number | null };
+  engine: {
+    config: { orderNotional: number };
+    lastFillPrice: number | null;
+    lastFillSide: string | null;
+    lastFillAt: number | null;
+    highestLvl: number | null;
+  };
 }) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   const prev = loadSettings();
@@ -233,6 +258,7 @@ function saveSettings(book: {
     lastFillPrice: book.engine.lastFillPrice ?? undefined,
     lastFillSide: book.engine.lastFillSide ?? undefined,
     lastFillAt: book.engine.lastFillAt ?? undefined,
+    highestLvl: book.engine.highestLvl ?? undefined,
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
@@ -292,6 +318,8 @@ function makeBook(market: MarketProfile): Book {
     const at = Number(saved.markets?.[market.symbol]?.lastFillAt);
     if (Number.isFinite(at) && at > 0) engine.lastFillAt = at;
   }
+  const hi = Number(saved.markets?.[market.symbol]?.highestLvl);
+  if (Number.isFinite(hi) && hi > 0) engine.highestLvl = hi;
   const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
@@ -487,7 +515,7 @@ async function tick() {
           mark: book.mark,
           live: book.live,
         });
-        if (book.engine.lastFillPrice) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl) saveSettings(book);
       }
     }
     drainAndSend();
@@ -545,10 +573,13 @@ input{width:6rem;margin:0 .4rem;background:#1b1d22;color:#ecece8;border:1px soli
 <script>
 function esc(s){return String(s).replace(/[&<>]/g,c=>c==="&"?"&#38;":c==="<"? "&#60;":"&#62;");}
 function card(s){
-  const d = s.prefer==="long"?4:5;
-  const q = s.prefer==="long"?2:1;
+  const d = Number(s.priceDecimals)|| (s.prefer==="long"?4:5);
+  const q = Number(s.sizeDecimals)|| (s.prefer==="long"?2:1);
   const orders=(s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(d)+" × "+Number(o.qty).toFixed(q)+"</li>").join("")||"<li>none</li>";
   const logs=[...(s.logs||[])].slice(-24).reverse().map(l=>"<li><code>"+new Date(l.ts).toISOString().slice(11,19)+"</code> "+esc(l.level)+" "+esc(l.message)+"</li>").join("")||"<li>empty</li>";
+  const cap = s.strategy==="accumulate"
+    ? " · hi <code>"+(s.highestLvl==null?"n/a":Number(s.highestLvl).toFixed(d))+"</code> · buy <code>$"+Number(s.buyUsed).toFixed(0)+"/"+Number(s.buyCap).toFixed(0)+"</code>"
+    : "";
   return '<div class="card" data-sym="'+esc(s.symbol)+'">'
     +"<h2>"+esc(s.symbol)+" "+esc(s.prefer)+" <code>m"+s.marketId+"</code></h2>"
     +"<p>armed <strong class='"+(s.armed?"ok":"warn")+"'>"+s.armed+"</strong>"
@@ -556,7 +587,7 @@ function card(s){
     +" · equity <code>$"+Number(s.equity).toFixed(2)+"</code>"
     +" · pos <code>"+Number(s.position.size).toFixed(q)+"</code>"
     +" · rem <code>$"+Number(s.remaining).toFixed(0)+"</code>"
-    +" · $/lvl <code>"+Number(s.orderNotional).toFixed(0)+"</code></p>"
+    +" · $/lvl <code>"+Number(s.orderNotional).toFixed(0)+"</code>"+cap+"</p>"
     +'<p><button data-cmd="/arm">Arm</button><button data-cmd="/disarm">Disarm</button><button data-cmd="/flatten">Flatten</button></p>'
     +'<p><label>$/lvl <input class="notional" type="number" min="10" max="10000" step="1" value="'+Number(s.orderNotional)+'"></label>'
     +'<button class="setNotional">Set</button></p>'
@@ -655,6 +686,7 @@ async function main() {
     } else {
       log(`${b.market.symbol} lastFill unknown — will infer from bot tickets or wait for a fill`);
     }
+    if (b.engine.highestLvl) log(`${b.market.symbol} highest_lvl ${b.engine.highestLvl}`);
   }
   if (!existsSync(path.resolve(".venv/bin/python"))) {
     log("cancel signer: no .venv — leftovers cannot cancel until: sudo apt-get install -y python3-venv && python3 -m venv .venv && .venv/bin/pip install git+https://github.com/elliottech/lighter-python.git");
@@ -680,7 +712,7 @@ async function main() {
           `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
-        if (book.engine.lastFillPrice) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl) saveSettings(book);
         for (const l of book.engine.logs.slice(-8)) {
           if (
             l.level === "gate" ||

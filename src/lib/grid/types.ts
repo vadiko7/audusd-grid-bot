@@ -124,6 +124,8 @@ export type EngineState = {
   foreignMargin: number;
   cancelSentAt: Record<string, number>;
   unackedPosDelta: number;
+  /** Accumulate: ratchet high-water fill. Never decreases. */
+  highestLvl: number | null;
 };
 
 export type StepInput = {
@@ -164,6 +166,9 @@ export type PublicSnapshot = {
   lastFillPrice: number | null;
   lastFillAt: number | null;
   lastFillSide: Side | null;
+  highestLvl: number | null;
+  buyCap: number;
+  buyUsed: number;
   levels: { sell: number; buy: number };
   bias: "short" | "long" | "flat";
 };

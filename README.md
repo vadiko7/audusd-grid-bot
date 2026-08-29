@@ -1,7 +1,9 @@
 # audusd-grid-bot
 
-AUDUSD short geometric grid for Lighter DEX. Headless on the Oracle VM.
+AUDUSD short + NATGAS long geometric grids, plus **SPCX long accumulate** (3× equity buy cap, harvest rips). Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
+
+`MARKETS=AUDUSD,NATGAS,SPCX` (default). SPCX is m194, $25 tickets, no shorts. `highest_lvl` ratchets up on fills and is saved in `data/settings.json`.
 
 ## First setup (VM)
 
@@ -41,7 +43,7 @@ ssh -i $env:USERPROFILE\Downloads\of.pem -L 8787:127.0.0.1:8787 ubuntu@158.179.1
 
 Then open http://127.0.0.1:8787/ — numbers update in place, the page does not reload.
 
-Arm (real $100 limits): button on that page, or:
+Arm (real $25 limits): button on that page, or:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/arm

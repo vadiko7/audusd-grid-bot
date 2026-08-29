@@ -2,11 +2,13 @@ export const LIGHTER_REST = "https://mainnet.zklighter.elliot.ai";
 export const LIGHTER_WS = "wss://mainnet.zklighter.elliot.ai/stream";
 
 export type Prefer = "long" | "short";
+export type GridStrategy = "classic" | "accumulate";
 
 export type MarketProfile = {
   symbol: string;
   marketId: number;
   prefer: Prefer;
+  strategy: GridStrategy;
   maxLeverage: number;
   orderNotional: number;
   priceDecimals: number;
@@ -31,6 +33,13 @@ export type MarketProfile = {
   adverseSteps: number;
   baseCycleMs: number;
   elevatedCycleMs: number;
+  /** Long-accumulate: max long notional as a multiple of equity. */
+  buyCapEquityMult?: number;
+  /** Reduce-only sell fraction of ticket at/above highest_lvl. */
+  harvestSellFrac?: number;
+  /** Reduce-only sell fraction of ticket below highest_lvl. */
+  reloadSellFrac?: number;
+  minQuoteNotional?: number;
 };
 
 /** AUDUSD Short Geometric Grid */
@@ -38,6 +47,7 @@ export const AUDUSD: MarketProfile = {
   symbol: "AUDUSD",
   marketId: 106,
   prefer: "short",
+  strategy: "classic",
   maxLeverage: 25,
   orderNotional: 25,
   priceDecimals: 5,
@@ -69,6 +79,7 @@ export const NATGAS: MarketProfile = {
   symbol: "NATGAS",
   marketId: 158,
   prefer: "long",
+  strategy: "classic",
   maxLeverage: 10,
   orderNotional: 25,
   priceDecimals: 4,
@@ -95,20 +106,57 @@ export const NATGAS: MarketProfile = {
   elevatedCycleMs: 300,
 };
 
+/** SPCX long accumulate — cap buys at 3× equity, harvest rips, no shorts */
+export const SPCX: MarketProfile = {
+  symbol: "SPCX",
+  marketId: 194,
+  prefer: "long",
+  strategy: "accumulate",
+  maxLeverage: 20,
+  orderNotional: 25,
+  priceDecimals: 2,
+  sizeDecimals: 4,
+  defaultSpacingPct: 1.0,
+  defaultFactor: 1.01,
+  atrSpacingMult: 0.55,
+  spacingMinPct: 1.0,
+  spacingMaxPct: 1.0,
+  spacingChangeThresholdPct: 0.15,
+  lowSpacingPct: 1.0,
+  highSpacingPct: 1.0,
+  regimeLow: 2.5,
+  regimeHigh: 5.0,
+  regimeExtreme: 8.0,
+  impulseTriggerPct: 1.75,
+  impulseCoolPct: 0.5,
+  impulseWindowMs: 50_000,
+  proximityMult: 1.25,
+  proximityMinPct: 1.25,
+  proximityMaxPct: 1.25,
+  adverseSteps: 8,
+  baseCycleMs: 2_000,
+  elevatedCycleMs: 250,
+  buyCapEquityMult: 3,
+  harvestSellFrac: 0.25,
+  reloadSellFrac: 0.9,
+  minQuoteNotional: 10,
+};
+
 export const MARKETS: Record<string, MarketProfile> = {
   AUDUSD,
   NATGAS,
+  SPCX,
 };
 
 export function parseMarkets(raw: string | undefined): MarketProfile[] {
-  const names = (raw || "AUDUSD,NATGAS")
+  const names = (raw || "AUDUSD,NATGAS,SPCX")
     .split(",")
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
   const out: MarketProfile[] = [];
   for (const name of names) {
     const m = MARKETS[name];
-    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS)`);
+    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS, SPCX)`);
     if (!out.some((x) => x.symbol === m.symbol)) out.push(m);
   }
   if (out.length === 0) throw new Error("MARKETS is empty");

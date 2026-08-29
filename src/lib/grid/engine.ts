@@ -182,7 +182,8 @@ function sellTicketUsd(state: EngineState, price: number): number {
   const hi = state.highestLvl;
   const frac =
     hi != null && price + 1e-12 >= hi ? (m.harvestSellFrac ?? 0.25) : (m.reloadSellFrac ?? 0.9);
-  return Math.max(ticket * frac, m.minQuoteNotional ?? 10);
+  const floor = m.minQuoteNotional ?? 13;
+  return Math.max(ticket * frac, floor);
 }
 
 function plusPnlSell(state: EngineState, price: number): boolean {
@@ -872,7 +873,7 @@ function updateImpulse(state: EngineState, input: StepInput) {
     if (resolved.impulse === "none") {
       state.impulseJustCooled = true;
       if (isAccumulate(state)) {
-        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — −1 buy if cap allows, no dump bunch`);
+        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch missed rungs then ±1`);
       } else {
         pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
       }
@@ -987,15 +988,11 @@ function impulseCoolCatch(state: EngineState): void {
   state.impulseJustCooled = false;
   const anchor = fillAnchor(state);
   if (!anchor || state.mark <= 0 || !state.config.armed) return;
-  if (isAccumulate(state)) {
-    ratchetHighest(state, state.mark, "cool new high");
-    cleanInvalid(state);
-    pushLog(state, "impulse", "impulse cool — ±1 only (no dump buy-bunch)");
-    return;
-  }
+  const acc = isAccumulate(state);
+  if (acc) ratchetHighest(state, state.mark, "cool new high");
   const m = state.config.market;
   const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
-  const prox = proximityPct(state.spacingPct, m);
+  const prox = acc ? accumulateProxPct(state) : proximityPct(state.spacingPct, m);
   const far = distPct > prox;
   if (!far) {
     cleanInvalid(state);
@@ -1011,18 +1008,31 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", `impulse cool far but flat — skip ${side} catch (prefer ${m.prefer})`);
     return;
   }
+  if (acc && side === "buy" && !underBuyCap(state)) {
+    pushLog(state, "impulse", `impulse cool far buy skipped — buy cap ${buyUsedUsd(state).toFixed(0)}/${buyCapUsd(state).toFixed(0)}`);
+    cleanInvalid(state);
+    return;
+  }
+  if (acc && side === "sell" && (isFlat(state) || state.position.size <= 0)) {
+    pushLog(state, "impulse", "impulse cool far sell skipped — no shorts");
+    return;
+  }
   const rawSteps = stepsAway(anchor, state.mark, state.factor);
   const nLevels = Math.max(1, Math.min(8, Math.round(rawSteps)));
-  const one = baseQty(state.mark, state.config.orderNotional, m.sizeDecimals);
+  const oneUsd = acc && side === "sell" ? sellTicketUsd(state, state.mark) : state.config.orderNotional;
+  const one = baseQty(state.mark, oneUsd, m.sizeDecimals);
   if (one <= 0) return;
   const reducing = (state.position.size < 0 && side === "buy") || (state.position.size > 0 && side === "sell");
   let qty = roundQty(one * nLevels, m.sizeDecimals);
   let reduceOnly = false;
-  if (reducing) {
+  if (reducing || (acc && side === "sell")) {
     qty = roundQty(Math.min(qty, Math.abs(state.position.size)), m.sizeDecimals);
     reduceOnly = true;
   } else {
-    const remaining = remainingCapacity(state);
+    let remaining = remainingCapacity(state);
+    if (acc && side === "buy") {
+      remaining = Math.min(remaining, Math.max(0, buyCapUsd(state) - buyUsedUsd(state)));
+    }
     const maxQty = baseQty(state.mark, remaining, m.sizeDecimals);
     qty = roundQty(Math.min(qty, maxQty), m.sizeDecimals);
   }
@@ -1040,6 +1050,7 @@ function impulseCoolCatch(state: EngineState): void {
   });
   state.lastFillPrice = state.mark;
   state.lastFillAt = state.now;
+  if (acc) ratchetHighest(state, state.mark, "cool catch");
   pushLog(
     state,
     "place",

@@ -168,10 +168,11 @@ function gridSized(
   notional: number,
   sizeDecimals: number,
   fracs: number[] = [1],
+  minQuote = 13,
 ): boolean {
   if (!(notional > 0) || !(order.price > 0)) return false;
   for (const f of fracs) {
-    const usd = Math.max(notional * f, 10);
+    const usd = Math.max(notional * f, minQuote);
     const nOk = Math.abs(order.notional - usd) / usd <= 0.35;
     const expect = baseQty(order.price, usd, sizeDecimals);
     const qOk = expect > 0 && Math.abs(order.qty - expect) / expect <= 0.35;
@@ -201,11 +202,13 @@ function adoptOrders(book: Book, liveOrders: GridOrder[]) {
       skip.set(o.id, now);
       continue;
     }
-    const sized = gridSized(o, book.engine.config.orderNotional, book.market.sizeDecimals, [
-      1,
-      book.market.harvestSellFrac ?? 0.25,
-      book.market.reloadSellFrac ?? 0.9,
-    ]);
+    const sized = gridSized(
+      o,
+      book.engine.config.orderNotional,
+      book.market.sizeDecimals,
+      [1, book.market.harvestSellFrac ?? 0.25, book.market.reloadSellFrac ?? 0.9],
+      book.market.minQuoteNotional ?? 13,
+    );
     const pendingHit = pending.some(
       (p) => p.side === o.side && sameRung(p.price, o.price, book.engine.factor) && Math.abs(p.qty - o.qty) / Math.max(p.qty, 1e-9) <= 0.3,
     );

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { NATGAS, SPCX } from "./markets.ts";
+import { NATGAS, SPCX, TSLA } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -1101,5 +1101,71 @@ describe("SPCX accumulate", () => {
     const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
     assert.ok(sells.length >= 1);
     assert.ok(sells.every((a) => a.reduceOnly));
+  });
+
+  it("harvest sell at/above highest_lvl is 25% of ticket floored at $13, scales with $/lvl", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 8, entry: 138 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 140.1,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 8, entry: 138 },
+        positionNotional: 1120,
+        orders: [],
+      }),
+    });
+    const sell = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sell);
+    assert.ok(sell.qty * sell.price >= 13 - 0.5);
+    assert.ok(sell.qty * sell.price < 16);
+
+    setOrderNotional(s, 80);
+    s.actions = [];
+    s.orders = [];
+    s.cancelledIds = [];
+    step(s, {
+      now: 4_000,
+      mark: 140.1,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 8, entry: 138 },
+        positionNotional: 1120,
+        orders: [],
+      }),
+    });
+    const sell2 = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sell2);
+    assert.ok(sell2.qty * sell2.price >= 20 - 1);
+  });
+
+  it("TSLA uses 0.75% factor and same accumulate cap", () => {
+    assert.equal(TSLA.defaultFactor, 1.0075);
+    assert.equal(TSLA.impulseCoolPct, 0.4);
+    const p = 350;
+    assert.equal(upLevel(p, TSLA.defaultFactor, TSLA.priceDecimals), roundPrice(p * 1.0075, 2));
+    const s = createInitialState({ market: TSLA, startingEquity: 500 });
+    s.lastFillPrice = 350;
+    s.lastFillAt = 1;
+    s.highestLvl = 350;
+    s.position = { size: 5, entry: 340 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 350.4,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 5, entry: 340 },
+        positionNotional: 1752,
+        orders: [],
+      }),
+    });
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "sell" && a.reduceOnly));
   });
 });

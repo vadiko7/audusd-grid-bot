@@ -1,9 +1,9 @@
 # audusd-grid-bot
 
-AUDUSD short + NATGAS long geometric grids, plus **SPCX long accumulate** (3× equity buy cap, harvest rips). Headless on the Oracle VM.
+AUDUSD short + NATGAS long geometric grids, plus **SPCX** and **TSLA** long accumulate (3× equity buy cap, harvest rips). Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
 
-`MARKETS=AUDUSD,NATGAS,SPCX` (default). SPCX is m194, $25 tickets, no shorts. `highest_lvl` ratchets up on fills and is saved in `data/settings.json`.
+`MARKETS=AUDUSD,NATGAS,SPCX,TSLA` (default). SPCX m194 1.00% / TSLA m112 0.75%. Both $25 tickets, no shorts, harvest 25% of $/lvl floored at $13. `highest_lvl` ratchets up on fills and is saved in `data/settings.json`.
 
 ## First setup (VM)
 

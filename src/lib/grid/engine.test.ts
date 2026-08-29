@@ -1205,4 +1205,25 @@ describe("SPCX accumulate", () => {
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "manual"));
   });
+
+  it("skips reduce-only sell when position is below Lighter min size", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 500 });
+    s.lastFillPrice = 140.75;
+    s.lastFillAt = 1;
+    s.highestLvl = 140.75;
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 140.75,
+      live: liveAccount({
+        equity: 510,
+        position: { size: 0.0156, entry: 140.7 },
+        positionNotional: 2.2,
+        orders: [],
+      }),
+    });
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
+    const buy = downLevel(140.75, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+  });
 });

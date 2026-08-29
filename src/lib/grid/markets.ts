@@ -40,6 +40,7 @@ export type MarketProfile = {
   /** Reduce-only sell fraction of ticket below highest_lvl. */
   reloadSellFrac?: number;
   minQuoteNotional?: number;
+  minBaseAmount?: number;
 };
 
 /** AUDUSD Short Geometric Grid */
@@ -140,9 +141,8 @@ export const SPCX: MarketProfile = {
   harvestSellFrac: 0.25,
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
+  minBaseAmount: 0.065,
 };
-
-/** TSLA long accumulate — same as SPCX, tighter 0.75% grid / softer impulse */
 export const TSLA: MarketProfile = {
   symbol: "TSLA",
   marketId: 112,
@@ -176,6 +176,7 @@ export const TSLA: MarketProfile = {
   harvestSellFrac: 0.25,
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
+  minBaseAmount: 0.02,
 };
 
 export const MARKETS: Record<string, MarketProfile> = {

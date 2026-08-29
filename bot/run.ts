@@ -436,33 +436,43 @@ async function executeActions(book: Book, actions: EngineAction[]) {
   await refreshNonce(creds).catch(() => {});
   for (const action of actions) {
     if (action.type !== "place") continue;
-    const clientOrderIndex = clientSeq++;
-    const exec = action.exec === "market" ? "market" : "limit";
-    const signed =
-      exec === "market"
-        ? await signCreateMarket(creds, {
-            marketIndex: m.marketId,
-            clientOrderIndex,
-            baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
-            avgExecutionPrice: Math.round(action.price * 10 ** m.priceDecimals),
-            isAsk: action.side === "sell",
-            reduceOnly: action.reduceOnly,
-          })
-        : await signCreateLimit(creds, {
-            marketIndex: m.marketId,
-            clientOrderIndex,
-            baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
-            price: Math.round(action.price * 10 ** m.priceDecimals),
-            isAsk: action.side === "sell",
-            reduceOnly: action.reduceOnly,
-          });
-    const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
-    lastTx = res.hash || lastTx;
-    if (!book.owned.clients.some((x) => x.n === clientOrderIndex)) {
-      book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
+    try {
+      const clientOrderIndex = clientSeq++;
+      const exec = action.exec === "market" ? "market" : "limit";
+      const signed =
+        exec === "market"
+          ? await signCreateMarket(creds, {
+              marketIndex: m.marketId,
+              clientOrderIndex,
+              baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
+              avgExecutionPrice: Math.round(action.price * 10 ** m.priceDecimals),
+              isAsk: action.side === "sell",
+              reduceOnly: action.reduceOnly,
+            })
+          : await signCreateLimit(creds, {
+              marketIndex: m.marketId,
+              clientOrderIndex,
+              baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
+              price: Math.round(action.price * 10 ** m.priceDecimals),
+              isAsk: action.side === "sell",
+              reduceOnly: action.reduceOnly,
+            });
+      const res = await sendTx({ ...signed, accountIndex: creds.accountIndex, apiKeyIndex: creds.apiKeyIndex });
+      lastTx = res.hash || lastTx;
+      if (!book.owned.clients.some((x) => x.n === clientOrderIndex)) {
+        book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
+      }
+      saveOwned();
+      log(`${m.symbol} tx ${exec} ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
+      log(`${m.symbol} tx error ${action.side} ${action.price} × ${action.qty} ${msg}`);
+      if (/invalid nonce/i.test(msg)) {
+        await refreshNonce(creds).catch(() => {});
+        dropSigner(creds);
+      }
     }
-    saveOwned();
-    log(`${m.symbol} tx ${exec} ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
   }
 }
 

@@ -186,6 +186,30 @@ function sellTicketUsd(state: EngineState, price: number): number {
   return Math.max(ticket * frac, floor);
 }
 
+function liftQtyToMins(state: EngineState, qty: number, price: number): number {
+  const m = state.config.market;
+  const step = 10 ** -m.sizeDecimals;
+  const minBase = m.minBaseAmount ?? 0;
+  const minQuote = m.minQuoteNotional ?? 0;
+  let q = qty;
+  if (minBase > 0 && q + 1e-12 < minBase) q = minBase;
+  q = roundQty(q, m.sizeDecimals);
+  let guard = 0;
+  while (minQuote > 0 && q * price + 1e-9 < minQuote && guard++ < 50) {
+    q = roundQty(q + step, m.sizeDecimals);
+  }
+  return q;
+}
+
+function meetsExchangeMins(state: EngineState, qty: number, price: number): boolean {
+  const m = state.config.market;
+  const minBase = m.minBaseAmount ?? 0;
+  const minQuote = m.minQuoteNotional ?? 0;
+  if (minBase > 0 && qty + 1e-12 < minBase) return false;
+  if (minQuote > 0 && qty * price + 0.05 < minQuote) return false;
+  return qty > 0;
+}
+
 function plusPnlSell(state: EngineState, price: number): boolean {
   const entry = state.position.entry;
   if (!(entry > 0) || isFlat(state)) return false;
@@ -551,7 +575,7 @@ function expectedFillPnl(state: EngineState, side: Side, price: number, qty: num
 } {
   const pos = state.position.size;
   const entry = state.position.entry;
-  if (Math.abs(pos) < FLAT_NOTIONAL_EPS || entry <= 0) {
+  if (Math.abs(pos) < 1e-9 || entry <= 0 || isFlat(state)) {
     return { pnl: 0, kind: "open", note: `open ${side} from flat` };
   }
   const reducing = (pos < 0 && side === "buy") || (pos > 0 && side === "sell");
@@ -591,11 +615,25 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
     const usd = sellTicketUsd(state, price);
     qty = opts.qty ?? baseQty(price, usd, m.sizeDecimals);
     reduceOnly = true;
-    const maxClose = Math.abs(state.position.size);
-    if (qty > maxClose) qty = roundQty(maxClose, m.sizeDecimals);
   }
-  if (qty <= 0) {
-    pushLog(state, "gate", "gate — base_qty is 0");
+  qty = liftQtyToMins(state, qty, price);
+  if (isAccumulate(state) && side === "sell") {
+    const maxClose = Math.abs(state.position.size);
+    if (qty > maxClose + 1e-12) {
+      pushLog(
+        state,
+        "gate",
+        `gate SELL ${price.toFixed(m.priceDecimals)} — pos ${maxClose.toFixed(m.sizeDecimals)} below Lighter min`,
+      );
+      return false;
+    }
+  }
+  if (!meetsExchangeMins(state, qty, price)) {
+    pushLog(
+      state,
+      "gate",
+      `gate ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} — below Lighter min (base ${m.minBaseAmount ?? 0} / quote $${m.minQuoteNotional ?? 0})`,
+    );
     return false;
   }
   const order: GridOrder = {

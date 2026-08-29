@@ -217,7 +217,7 @@ function adoptOrders(book: Book, liveOrders: GridOrder[]) {
       o.clientOrderIndex != null &&
       clients.has(o.clientOrderIndex) &&
       (liveByClient.get(o.clientOrderIndex) ?? 0) === 1;
-    if ((pendingHit && sized) || clientHit || sized) {
+    if ((pendingHit && sized) || clientHit) {
       ids.set(o.id, now);
       if (o.clientOrderIndex != null) clients.set(o.clientOrderIndex, now);
       continue;

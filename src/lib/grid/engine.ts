@@ -1088,6 +1088,17 @@ function impulseCoolCatch(state: EngineState): void {
     qty = roundQty(Math.min(qty, maxQty), m.sizeDecimals);
   }
   if (qty <= 0) return;
+  qty = liftQtyToMins(state, qty, state.mark);
+  if (!meetsExchangeMins(state, qty, state.mark)) {
+    pushLog(state, "impulse", `impulse cool skip — qty ${qty.toFixed(m.sizeDecimals)} below Lighter min`);
+    cleanInvalid(state);
+    return;
+  }
+  if (acc && side === "sell" && qty > Math.abs(state.position.size) + 1e-12) {
+    pushLog(state, "impulse", "impulse cool sell skip — position below min clip");
+    cleanInvalid(state);
+    return;
+  }
   const price = roundPrice(state.mark, m.priceDecimals);
   cancelAll(state, "impulse cool catch market");
   emit(state, {

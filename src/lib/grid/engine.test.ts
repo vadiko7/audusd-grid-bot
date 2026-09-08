@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AUDUSD, ETH, GEV, NATGAS, SPCX, TSLA } from "./markets.ts";
+import { AUDUSD, ETH, GEV, NATGAS, SPCX, TSLA, XAU } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -1239,6 +1239,34 @@ describe("SPCX accumulate", () => {
       }),
     });
     const buy = downLevel(s.lastFillPrice ?? p, GEV.defaultFactor, GEV.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
+  });
+
+  it("XAU uses 0.50% / 25x accumulate, $25 ticket, impulse 0.65/0.20", () => {
+    assert.equal(XAU.marketId, 92);
+    assert.equal(XAU.maxLeverage, 25);
+    assert.equal(XAU.orderNotional, 25);
+    assert.equal(XAU.defaultFactor, 1.005);
+    assert.equal(XAU.impulseTriggerPct, 0.65);
+    assert.equal(XAU.impulseCoolPct, 0.2);
+    assert.equal(XAU.buyCapEquityMult, 3);
+    const p = 4424.04;
+    const lv = levelsFromAnchor(p, XAU, XAU.defaultFactor);
+    assert.equal(lv.buy, roundPrice(p / 1.005, 2));
+    assert.equal(lv.sell, roundPrice(p * 1.005 ** 1.1, 2));
+    const s = createInitialState({ market: XAU, startingEquity: 500 });
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: p,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 0, entry: 0 },
+        orders: [],
+      }),
+    });
+    const buy = downLevel(s.lastFillPrice ?? p, XAU.defaultFactor, XAU.priceDecimals);
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
   });

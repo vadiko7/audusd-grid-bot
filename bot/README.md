@@ -1,9 +1,9 @@
 # audusd-grid-bot
 
-AUDUSD short + NATGAS long geometric grids, plus **SPCX**, **TSLA**, **ETH**, and **GEV** long accumulate (3× equity buy cap, harvest rips). Headless on the Oracle VM.
+AUDUSD short + NATGAS long geometric grids, plus **SPCX**, **TSLA**, **ETH**, **GEV**, and **XAU** long accumulate (3× equity buy cap, harvest rips). Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
 
-`MARKETS=AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV` (default). Entry is 1 step; TP is 1.1 steps (AUD cover / longs sell). AUDUSD 0.10% / 0.11%. NATGAS 0.50% / 0.55%. SPCX 1.00% / 1.10%. TSLA 0.75% / 0.825%. ETH 0.80% / 0.88% · 50x. GEV 0.80% / 0.88% · 10x · impulse 1.25% / cool 0.40%. Accumulate books: $25 tickets, no shorts, harvest 25% of $/lvl floored at $13.
+`MARKETS=AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU` (default). Entry is 1 step; TP is 1.1 steps (AUD cover / longs sell). AUDUSD 0.10% / 0.11%. NATGAS 0.50% / 0.55%. SPCX 1.00% / 1.10%. TSLA 0.75% / 0.825%. ETH 0.80% / 0.88% · 50x. GEV 0.80% / 0.88% · 10x. XAU 0.50% / 0.55% · 25x · impulse 0.65% / cool 0.20%. Accumulate books: $25 tickets, no shorts, harvest 25% of $/lvl floored at $13.
 
 ## First setup (VM)
 

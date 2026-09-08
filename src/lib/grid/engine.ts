@@ -233,8 +233,15 @@ function inferLastFill(state: EngineState, orders: GridOrder[]): number | null {
   if (buys.length >= 1 && sells.length >= 1) {
     const buy = buys.reduce((a, b) => (a.price > b.price ? a : b));
     const sell = sells.reduce((a, b) => (a.price < b.price ? a : b));
-    const fromBuy = upLevel(buy.price, f, m.priceDecimals);
-    const fromSell = downLevel(sell.price, tpFactorOf(m, f), m.priceDecimals);
+    const tpF = tpFactorOf(m, f);
+    const fromBuy =
+      m.prefer === "long"
+        ? upLevel(buy.price, f, m.priceDecimals)
+        : upLevel(buy.price, tpF, m.priceDecimals);
+    const fromSell =
+      m.prefer === "long"
+        ? downLevel(sell.price, tpF, m.priceDecimals)
+        : downLevel(sell.price, f, m.priceDecimals);
     if (sameRung(fromBuy, fromSell, f) || Math.abs(fromBuy - fromSell) / Math.max(fromBuy, 1e-9) < 0.002) {
       return fromBuy;
     }
@@ -243,10 +250,12 @@ function inferLastFill(state: EngineState, orders: GridOrder[]): number | null {
   const nearest = [...live].sort((a, b) => Math.abs(a.price - state.mark) - Math.abs(b.price - state.mark))[0];
   const dist = stepsAway(state.mark, nearest.price, f);
   if (dist < 0.65) return nearest.price;
-  if (Math.abs(dist - 1) < 0.45) {
-    return nearest.side === "sell"
-      ? downLevel(nearest.price, f, m.priceDecimals)
-      : upLevel(nearest.price, f, m.priceDecimals);
+  if (Math.abs(dist - 1) < 0.45 || Math.abs(dist - (m.tpSteps ?? 1.1)) < 0.45) {
+    const tpF = tpFactorOf(m, f);
+    if (nearest.side === "sell") {
+      return downLevel(nearest.price, m.prefer === "long" ? tpF : f, m.priceDecimals);
+    }
+    return upLevel(nearest.price, m.prefer === "long" ? f : tpF, m.priceDecimals);
   }
   return null;
 }

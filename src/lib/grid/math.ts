@@ -32,6 +32,8 @@ export function downLevel(price: number, factor: number, priceDecimals = PRICE_D
 }
 
 export function tpFactorOf(market: MarketProfile, entryFactor: number): number {
+  const steps = market.tpSteps ?? 1.1;
+  if (entryFactor > 1 && steps > 0) return entryFactor ** steps;
   return market.tpFactor && market.tpFactor > 1 ? market.tpFactor : entryFactor;
 }
 
@@ -59,7 +61,7 @@ export function inProximity(price: number, target: number, proxPct: number): boo
 
 export function sameRung(price: number, target: number, factor: number): boolean {
   if (target <= 0 || price <= 0 || factor <= 1) return false;
-  return stepsAway(price, target, factor) < 0.5;
+  return stepsAway(price, target, factor) < 0.08;
 }
 
 export function stepsAway(from: number, to: number, factor: number): number {

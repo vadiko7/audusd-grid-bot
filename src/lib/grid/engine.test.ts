@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { NATGAS, SPCX, TSLA } from "./markets.ts";
+import { AUDUSD, NATGAS, SPCX, TSLA } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -18,6 +18,10 @@ import { classifyRegime, spacingFromAtr } from "./atr.ts";
 import type { GridOrder } from "./types.ts";
 import { nextImpulse } from "./impulse.ts";
 import type { Candle, EngineState, LiveAccount } from "./types.ts";
+
+function pair(anchor: number, market: typeof AUDUSD = AUDUSD) {
+  return levelsFromAnchor(anchor, market, market.defaultFactor);
+}
 
 function run(state: EngineState, mark: number, now: number, extras: { hourly?: Candle[]; minute?: Candle } = {}) {
   return step(state, {
@@ -69,6 +73,19 @@ describe("geometry", () => {
     const p = 0.71575;
     assert.equal(upLevel(p, DEFAULT_FACTOR), roundPrice(p * 1.001));
     assert.equal(downLevel(p, DEFAULT_FACTOR), roundPrice(p / 1.001));
+  });
+
+  it("TP side is 1.1 entry steps (sell for longs, buy for shorts)", () => {
+    const p = 0.71575;
+    const aud = levelsFromAnchor(p, AUDUSD, AUDUSD.defaultFactor);
+    assert.equal(aud.sell, roundPrice(p * 1.001));
+    assert.equal(aud.buy, roundPrice(p / 1.001 ** 1.1));
+    const gas = levelsFromAnchor(2.9, NATGAS, NATGAS.defaultFactor);
+    assert.equal(gas.buy, roundPrice(2.9 / 1.005, 4));
+    assert.equal(gas.sell, roundPrice(2.9 * 1.005 ** 1.1, 4));
+    const spx = levelsFromAnchor(140, SPCX, SPCX.defaultFactor);
+    assert.equal(spx.buy, roundPrice(140 / 1.01, 2));
+    assert.equal(spx.sell, roundPrice(140 * 1.01 ** 1.1, 2));
   });
 });
 
@@ -226,8 +243,8 @@ describe("engine cycle", () => {
   it("cleans extra ±2 down to one buy and one sell", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;
-    const innerBuy = downLevel(last, DEFAULT_FACTOR);
-    const innerSell = upLevel(last, DEFAULT_FACTOR);
+    const innerBuy = pair(last).buy;
+    const innerSell = pair(last).sell;
     const farBuy = downLevel(innerBuy, DEFAULT_FACTOR);
     const farSell = upLevel(innerSell, DEFAULT_FACTOR);
     s.lastFillPrice = last;
@@ -257,8 +274,8 @@ describe("engine cycle", () => {
     s.orders = [{ id: "old", side: "sell", price: farSell, qty: 34.9, notional: 25, placedAt: 1 }];
     setArmed(s, true);
     run(s, 0.71725, 2_000);
-    const innerSell = upLevel(last, DEFAULT_FACTOR);
-    const innerBuy = downLevel(last, DEFAULT_FACTOR);
+    const innerBuy = pair(last).buy;
+    const innerSell = pair(last).sell;
     const sells = s.orders.filter((o) => o.side === "sell");
     const buys = s.orders.filter((o) => o.side === "buy");
     assert.equal(sells.length, 1);
@@ -307,8 +324,8 @@ describe("engine cycle", () => {
       }),
     });
     assert.equal(s.lastFillPrice, sold);
-    const innerBuy = downLevel(sold, DEFAULT_FACTOR);
-    const innerSell = upLevel(sold, DEFAULT_FACTOR);
+    const innerBuy = pair(sold).buy;
+    const innerSell = pair(sold).sell;
     const placed = s.actions.filter((a) => a.type === "place").map((a) => a.price);
     const working = s.orders.map((o) => o.price);
     const prices = [...placed, ...working];
@@ -468,8 +485,8 @@ describe("engine cycle", () => {
       }),
     });
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "onfill"));
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     const placed = s.actions.filter((a) => a.type === "place").map((a) => a.price);
     assert.ok(placed.some((p) => Math.abs(p - buy) < 1e-8));
     assert.ok(placed.some((p) => Math.abs(p - sell) < 1e-8));
@@ -544,8 +561,8 @@ describe("engine cycle", () => {
       }),
     });
     assert.equal(s.lastFillPrice, last);
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     const places = s.actions.filter((a) => a.type === "place");
     assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
     assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
@@ -587,8 +604,8 @@ describe("engine cycle", () => {
     s.lastFillPrice = last;
     s.lastFillAt = 1;
     s.position = { size: -1533.8, entry: last };
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     setArmed(s, true);
     step(s, {
       now: 2_000,
@@ -614,8 +631,8 @@ describe("engine cycle", () => {
     s.lastFillPrice = last;
     s.lastFillAt = 1;
     s.position = { size: -1533.8, entry: last };
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     setArmed(s, true);
     step(s, {
       now: 2_000,
@@ -691,8 +708,8 @@ describe("engine cycle", () => {
         orders: [],
       }),
     });
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     const places = s.actions.filter((a) => a.type === "place");
     assert.ok(places.some((a) => a.side === "buy" && Math.abs(a.price - buy) < 1e-8));
     assert.ok(places.some((a) => a.side === "sell" && Math.abs(a.price - sell) < 1e-8));
@@ -701,8 +718,8 @@ describe("engine cycle", () => {
   it("infers lastFill from an existing bot ±1 pair", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;
-    const buy = downLevel(last, DEFAULT_FACTOR);
-    const sell = upLevel(last, DEFAULT_FACTOR);
+    const buy = pair(last).buy;
+    const sell = pair(last).sell;
     s.lastFillPrice = null;
     s.position = { size: -1533.8, entry: last };
     setArmed(s, true);
@@ -809,8 +826,8 @@ describe("engine cycle", () => {
     assert.equal(s.fillsThisCycle.length, 1);
     assert.ok(s.position.size < 0);
     const prices = s.orders.map((o) => o.price).sort();
-    const expectedBuy = downLevel(seedPx, DEFAULT_FACTOR);
-    const expectedSell = upLevel(seedPx, DEFAULT_FACTOR);
+    const expectedBuy = pair(seedPx).buy;
+    const expectedSell = pair(seedPx).sell;
     assert.ok(prices.includes(expectedBuy));
     assert.ok(prices.includes(expectedSell));
   });
@@ -1146,11 +1163,11 @@ describe("SPCX accumulate", () => {
 
   it("TSLA uses 0.75% factor and same accumulate cap", () => {
     assert.equal(TSLA.defaultFactor, 1.0075);
-    assert.equal(TSLA.tpFactor, 1.011);
+    assert.equal(TSLA.tpSteps, 1.1);
     assert.equal(TSLA.impulseCoolPct, 0.4);
     const p = 350;
     assert.equal(upLevel(p, TSLA.defaultFactor, TSLA.priceDecimals), roundPrice(p * 1.0075, 2));
-    assert.equal(levelsFromAnchor(p, TSLA, TSLA.defaultFactor).sell, roundPrice(p * 1.011, 2));
+    assert.equal(levelsFromAnchor(p, TSLA, TSLA.defaultFactor).sell, roundPrice(p * 1.0075 ** 1.1, 2));
     const s = createInitialState({ market: TSLA, startingEquity: 500 });
     s.lastFillPrice = 350;
     s.lastFillAt = 1;

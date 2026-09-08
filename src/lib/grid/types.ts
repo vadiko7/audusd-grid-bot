@@ -23,6 +23,8 @@ export type GridOrder = {
   clientOrderIndex?: number;
   /** false = someone else's / leftover; occupies the rung, never cancel */
   mine?: boolean;
+  /** Impulse-cool bunch: rest at mid until fill. Never cancel as extra. */
+  holdUntilFill?: boolean;
 };
 
 export type Position = {
@@ -126,6 +128,8 @@ export type EngineState = {
   unackedPosDelta: number;
   /** Accumulate: ratchet high-water fill. Never decreases. */
   highestLvl: number | null;
+  /** Live order ids of resting bunch limits (persist across ingest / restart). */
+  holdIds: string[];
 };
 
 export type StepInput = {

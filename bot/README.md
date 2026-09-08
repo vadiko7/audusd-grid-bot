@@ -3,7 +3,7 @@
 AUDUSD short + NATGAS long geometric grids, plus **SPCX**, **TSLA**, **ETH**, **GEV**, **XAU**, and **BTC** long accumulate (3× equity buy cap, harvest rips). Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
 
-`MARKETS=AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default). Entry is 1 step; TP is 1.1 steps (AUD cover / longs sell). AUDUSD 0.10% / 0.11%. NATGAS 0.50% / 0.55%. SPCX 1.00% / 1.10%. TSLA 0.75% / 0.825%. ETH 0.80% / 0.88% · 50x. GEV 0.80% / 0.88% · 10x. XAU 0.50% / 0.55% · 25x. BTC 0.60% / 0.66% · 50x · impulse 1.00% / cool 0.30%. Accumulate books: $25 tickets, no shorts, harvest 25% of $/lvl floored at $13.
+`MARKETS=AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default). Entry is 1 step; TP is 1.1 steps (AUD cover / longs sell). AUDUSD 0.10% / 0.11%. NATGAS 0.50% / 0.55%. SPCX 1.00% / 1.10%. TSLA 0.75% / 0.825%. ETH 0.80% / 0.88% · 50x. GEV 0.80% / 0.88% · 10x. XAU 0.50% / 0.55% · 25x. BTC 0.60% / 0.66% · 50x · impulse 1.00% / cool 0.30%. Accumulate books: $25 tickets, no shorts, harvest 25% of $/lvl floored at $13. Impulse-cool catch-up is a **limit at mid**, held until fill — never a market.
 
 ## First setup (VM)
 

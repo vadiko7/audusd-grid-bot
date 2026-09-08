@@ -100,6 +100,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     cancelSentAt: {},
     unackedPosDelta: 0,
     highestLvl: null,
+    holdIds: [],
   };
 }
 
@@ -425,7 +426,8 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   state.position = { ...live.position };
   state.realizedPnl = live.realizedPnl;
   state.unrealizedPnl = live.unrealizedPnl;
-  state.orders = dedupRungs(state, [...liveOpen, ...stillPending]);
+  const merged = dedupRungs(state, [...liveOpen, ...stillPending]);
+  state.orders = applyHoldFlags(state, prev, merged);
   state.cancelledIds = [...stillCancelled];
   if (!state.lastFillPrice) {
     const inferred = inferLastFill(state, state.orders);
@@ -463,6 +465,21 @@ function dedupRungs(state: EngineState, orders: GridOrder[]): GridOrder[] {
   return keep;
 }
 
+function applyHoldFlags(state: EngineState, prev: GridOrder[], next: GridOrder[]): GridOrder[] {
+  const byId = new Map(prev.filter(isHoldOrder).map((o) => [o.id, o]));
+  const pendingHolds = prev.filter((o) => isHoldOrder(o) && o.id.startsWith("pending:"));
+  const remembered = new Set(state.holdIds);
+  const out = next.map((o) => {
+    if (byId.has(o.id) || remembered.has(o.id)) return { ...o, holdUntilFill: true, mine: true };
+    if (pendingHolds.some((p) => p.side === o.side && sameRung(p.price, o.price, state.factor))) {
+      return { ...o, holdUntilFill: true, mine: true };
+    }
+    return o;
+  });
+  state.holdIds = [...new Set(out.filter(isHoldOrder).map((o) => o.id).filter((id) => !id.startsWith("pending:")))];
+  return out;
+}
+
 function emit(state: EngineState, action: EngineAction) {
   state.actions = [...state.actions, action];
   if (action.type === "cancel") state.cancelSentAt[action.orderId] = state.now;
@@ -488,7 +505,13 @@ function hasNear(state: EngineState, target: number, side?: Side): boolean {
 }
 
 type GateFail = { reason: string; extra?: Record<string, string | number | boolean> };
-type PlaceOpts = { qty?: number; reduceOnly?: boolean; allowImpulse?: boolean; allowExtra?: boolean };
+type PlaceOpts = {
+  qty?: number;
+  reduceOnly?: boolean;
+  allowImpulse?: boolean;
+  allowExtra?: boolean;
+  holdUntilFill?: boolean;
+};
 
 function gateCandidate(state: EngineState, side: Side, target: number, opts: PlaceOpts = {}): GateFail | null {
   if (!state.config.armed) return { reason: "disarmed" };
@@ -570,11 +593,13 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
     return { reason: `flat — skip opposite (${state.config.market.prefer}-preferring)` };
   }
 
-  if (side === "sell" && target <= state.mark) {
-    return { reason: `marketable sell ${target.toFixed(5)} ≤ mark ${state.mark.toFixed(5)}` };
-  }
-  if (side === "buy" && target >= state.mark) {
-    return { reason: `marketable buy ${target.toFixed(5)} ≥ mark ${state.mark.toFixed(5)}` };
+  if (!opts.holdUntilFill) {
+    if (side === "sell" && target <= state.mark) {
+      return { reason: `marketable sell ${target.toFixed(5)} ≤ mark ${state.mark.toFixed(5)}` };
+    }
+    if (side === "buy" && target >= state.mark) {
+      return { reason: `marketable buy ${target.toFixed(5)} ≥ mark ${state.mark.toFixed(5)}` };
+    }
   }
 
   return null;
@@ -656,8 +681,12 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
     notional: qty * price,
     placedAt: state.now,
     mine: true,
+    holdUntilFill: opts.holdUntilFill || undefined,
   };
   state.orders = [...state.orders, order];
+  if (opts.holdUntilFill) {
+    state.holdIds = [...new Set([...state.holdIds, order.id])];
+  }
   emit(state, { type: "place", side, price, qty, why, reduceOnly: reduceOnly || undefined });
   const expect = expectedFillPnl(state, side, price, qty);
   const px = price.toFixed(m.priceDecimals);
@@ -673,12 +702,17 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
   return true;
 }
 
+function isHoldOrder(order: GridOrder): boolean {
+  return order.holdUntilFill === true;
+}
+
 function isMineOrder(order: GridOrder): boolean {
   return order.mine !== false;
 }
 
 function cancelAll(state: EngineState, reason: string) {
-  const mine = state.orders.filter(isMineOrder);
+  const force = /disarm|flatten/i.test(reason);
+  const mine = state.orders.filter((o) => isMineOrder(o) && (force || !isHoldOrder(o)));
   if (mine.length === 0) {
     state.lastCleanReason = reason;
     return;
@@ -691,6 +725,10 @@ function cancelAll(state: EngineState, reason: string) {
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {
   if (!isMineOrder(order)) return;
+  if (isHoldOrder(order) && !/disarm|flatten/i.test(why)) {
+    pushLog(state, "info", `hold ${order.side.toUpperCase()} ${order.price.toFixed(state.config.market.priceDecimals)} — leave until fill (${why})`);
+    return;
+  }
   if (state.cancelledIds.includes(order.id)) return;
   state.cancelledIds.push(order.id);
   emit(state, {
@@ -761,7 +799,7 @@ function cleanInvalid(state: EngineState) {
     const allowed = accumulateTargets(state);
     const keep: GridOrder[] = [];
     for (const order of state.orders) {
-      if (!isMineOrder(order)) {
+      if (!isMineOrder(order) || isHoldOrder(order)) {
         keep.push(order);
         continue;
       }
@@ -776,7 +814,7 @@ function cleanInvalid(state: EngineState) {
   const m = state.config.market;
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
-    if (!isMineOrder(order)) keep.push(order);
+    if (!isMineOrder(order) || isHoldOrder(order)) keep.push(order);
   }
   const mine = state.orders.filter(isMineOrder);
   const targetOf = (side: Side) => (side === "buy" ? levels.buy : levels.sell);
@@ -878,6 +916,10 @@ function postFillMissed(state: EngineState, fill: Fill) {
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
     if (!isMineOrder(order)) {
+      keep.push(order);
+      continue;
+    }
+    if (isHoldOrder(order)) {
       keep.push(order);
       continue;
     }
@@ -1058,6 +1100,10 @@ function impulseCoolCatch(state: EngineState): void {
   const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
   const prox = acc ? accumulateProxPct(state) : proximityPct(state.spacingPct, m);
   const far = distPct > prox;
+  if (state.orders.some(isHoldOrder)) {
+    pushLog(state, "impulse", "impulse cool — bunch limit already resting until fill");
+    return;
+  }
   if (!far) {
     cleanInvalid(state);
     pushLog(
@@ -1113,24 +1159,23 @@ function impulseCoolCatch(state: EngineState): void {
     return;
   }
   const price = roundPrice(state.mark, m.priceDecimals);
-  cancelAll(state, "impulse cool catch market");
-  emit(state, {
-    type: "place",
-    side,
-    price,
-    qty,
-    why: `impulse-cool market ${nLevels} lvl`,
-    exec: "market",
-    reduceOnly,
-  });
-  state.lastFillPrice = state.mark;
-  state.lastFillAt = state.now;
-  if (acc) ratchetHighest(state, state.mark, "cool catch");
+  cancelAll(state, "impulse cool leftover bot limits");
+  const why = `impulse-cool bunch ${nLevels} lvl @ mid`;
+  if (
+    !placeLimit(state, side, price, why, {
+      qty,
+      reduceOnly,
+      allowExtra: true,
+      holdUntilFill: true,
+    })
+  ) {
+    return;
+  }
   pushLog(
     state,
     "place",
-    `impulse cool MARKET ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} · ${nLevels} missed lvl · Δ ${distPct.toFixed(2)}% > prox ${prox.toFixed(2)}% then ±1`,
-    { side, price, qty, exec: "market", n: nLevels, distPct, prox },
+    `impulse cool LIMIT ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} missed lvl · Δ ${distPct.toFixed(2)}% > prox ${prox.toFixed(2)}% — hold until fill`,
+    { side, price, qty, exec: "limit", n: nLevels, distPct, prox, hold: true },
   );
 }
 
@@ -1172,7 +1217,7 @@ function runArmedCycle(state: EngineState) {
     impulseCoolCatch(state);
   }
 
-  if (!waitFill) maintainPair(state, "maintain ±1");
+  if (!waitFill && !state.orders.some(isHoldOrder)) maintainPair(state, "maintain ±1");
 }
 
 export function step(state: EngineState, input: StepInput): EngineState {
@@ -1246,6 +1291,7 @@ export function snapshotPublic(state: EngineState) {
     lastFillAt: state.lastFillAt,
     lastFillSide: state.lastFillSide,
     highestLvl: state.highestLvl,
+    holdOrderIds: state.holdIds,
     buyCap: isAccumulate(state) ? buyCapUsd(state) : remaining,
     buyUsed: isAccumulate(state) ? buyUsedUsd(state) : posN,
     levels,

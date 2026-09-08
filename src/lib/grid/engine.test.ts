@@ -915,7 +915,7 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel_all" && String(a.why).includes("spacing")));
   });
 
-  it("impulse cool far from last fill sends one market for missed levels", () => {
+  it("impulse cool far from last fill rests a mid LIMIT until fill (never market)", () => {
     const s = createInitialState({ startingEquity: 8000 });
     const t0 = 100_000;
     for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
@@ -934,10 +934,21 @@ describe("engine cycle", () => {
       }
     }
     assert.equal(s.impulse, "none");
-    const mkt = catchActions.find((a) => a.type === "place" && a.exec === "market");
-    assert.ok(mkt);
-    assert.equal(mkt && mkt.type === "place" ? mkt.side : "", "sell");
-    assert.ok(mkt && mkt.type === "place" ? mkt.qty > baseQty(0.73) : false);
+    assert.equal(
+      catchActions.find((a) => a.type === "place" && a.exec === "market"),
+      undefined,
+    );
+    const lim = catchActions.find((a) => a.type === "place");
+    assert.ok(lim && lim.type === "place");
+    assert.equal(lim.side, "sell");
+    assert.ok(lim.qty > baseQty(0.73));
+    assert.ok(Math.abs(lim.price - 0.73) < 1e-8);
+    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell"));
+    assert.equal(s.lastFillPrice, 0.7);
+    const holdId = s.orders.find((o) => o.holdUntilFill)?.id;
+    run(s, 0.73, t0 + 200_000);
+    assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === holdId));
   });
 
   it("impulse cool near last fill uses a limit at mark then ±1", () => {
@@ -965,8 +976,10 @@ describe("engine cycle", () => {
       }
     }
     assert.equal(s.impulse, "none");
-    const mkt = catchActions.find((a) => a.type === "place" && a.exec === "market");
-    assert.equal(mkt, undefined);
+    assert.equal(
+      catchActions.find((a) => a.type === "place" && a.exec === "market"),
+      undefined,
+    );
     const lim = catchActions.find((a) => a.type === "place");
     assert.ok(lim);
   });

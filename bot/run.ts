@@ -70,6 +70,7 @@ type SavedSettings = {
       lastFillSide?: string;
       lastFillAt?: number;
       highestLvl?: number;
+      holdOrderIds?: string[];
     }
   >;
   orderNotional?: number;
@@ -250,6 +251,7 @@ function saveSettings(book: {
     lastFillSide: string | null;
     lastFillAt: number | null;
     highestLvl: number | null;
+    holdIds: string[];
   };
 }) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
@@ -262,6 +264,7 @@ function saveSettings(book: {
     lastFillSide: book.engine.lastFillSide ?? undefined,
     lastFillAt: book.engine.lastFillAt ?? undefined,
     highestLvl: book.engine.highestLvl ?? undefined,
+    holdOrderIds: book.engine.holdIds.length ? book.engine.holdIds : undefined,
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
@@ -323,6 +326,8 @@ function makeBook(market: MarketProfile): Book {
   }
   const hi = Number(saved.markets?.[market.symbol]?.highestLvl);
   if (Number.isFinite(hi) && hi > 0) engine.highestLvl = hi;
+  const holds = saved.markets?.[market.symbol]?.holdOrderIds;
+  if (Array.isArray(holds)) engine.holdIds = holds.filter((id) => typeof id === "string" && id.length > 0);
   const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
@@ -528,7 +533,7 @@ async function tick() {
           mark: book.mark,
           live: book.live,
         });
-        if (book.engine.lastFillPrice || book.engine.highestLvl) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length) saveSettings(book);
       }
     }
     drainAndSend();
@@ -725,7 +730,7 @@ async function main() {
           `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
-        if (book.engine.lastFillPrice || book.engine.highestLvl) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length) saveSettings(book);
         for (const l of book.engine.logs.slice(-8)) {
           if (
             l.level === "gate" ||

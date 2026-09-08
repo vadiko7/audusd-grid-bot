@@ -191,22 +191,62 @@ export const TSLA: MarketProfile = {
   minBaseAmount: 0.02,
 };
 
+/** ETH long accumulate — $25, 0.80% entry, 50x, cap 3× equity */
+export const ETH: MarketProfile = {
+  symbol: "ETH",
+  marketId: 0,
+  prefer: "long",
+  strategy: "accumulate",
+  maxLeverage: 50,
+  orderNotional: 25,
+  priceDecimals: 2,
+  sizeDecimals: 4,
+  defaultSpacingPct: 0.8,
+  defaultFactor: 1.008,
+  tpSteps: 1.1,
+  tpFactor: 1.0088,
+  atrSpacingMult: 0.55,
+  spacingMinPct: 0.8,
+  spacingMaxPct: 0.8,
+  spacingChangeThresholdPct: 0.15,
+  lowSpacingPct: 0.8,
+  highSpacingPct: 0.8,
+  regimeLow: 2.5,
+  regimeHigh: 5.0,
+  regimeExtreme: 8.0,
+  impulseTriggerPct: 1.25,
+  impulseCoolPct: 0.4,
+  impulseWindowMs: 50_000,
+  proximityMult: 1.5625,
+  proximityMinPct: 1.25,
+  proximityMaxPct: 1.25,
+  adverseSteps: 8,
+  baseCycleMs: 2_000,
+  elevatedCycleMs: 250,
+  buyCapEquityMult: 3,
+  harvestSellFrac: 0.25,
+  reloadSellFrac: 0.9,
+  minQuoteNotional: 13,
+  minBaseAmount: 0.005,
+};
+
 export const MARKETS: Record<string, MarketProfile> = {
   AUDUSD,
   NATGAS,
   SPCX,
   TSLA,
+  ETH,
 };
 
 export function parseMarkets(raw: string | undefined): MarketProfile[] {
-  const names = (raw || "AUDUSD,NATGAS,SPCX,TSLA")
+  const names = (raw || "AUDUSD,NATGAS,SPCX,TSLA,ETH")
     .split(",")
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
   const out: MarketProfile[] = [];
   for (const name of names) {
     const m = MARKETS[name];
-    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS, SPCX, TSLA)`);
+    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS, SPCX, TSLA, ETH)`);
     if (!out.some((x) => x.symbol === m.symbol)) out.push(m);
   }
   if (out.length === 0) throw new Error("MARKETS is empty");

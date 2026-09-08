@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AUDUSD, NATGAS, SPCX, TSLA } from "./markets.ts";
+import { AUDUSD, ETH, NATGAS, SPCX, TSLA } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -1186,6 +1186,34 @@ describe("SPCX accumulate", () => {
     });
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "sell" && a.reduceOnly));
+  });
+
+  it("ETH uses 0.80% / 50x accumulate, $25 ticket, 1.1-step TP", () => {
+    assert.equal(ETH.marketId, 0);
+    assert.equal(ETH.maxLeverage, 50);
+    assert.equal(ETH.orderNotional, 25);
+    assert.equal(ETH.defaultFactor, 1.008);
+    assert.equal(ETH.impulseTriggerPct, 1.25);
+    assert.equal(ETH.impulseCoolPct, 0.4);
+    assert.equal(ETH.buyCapEquityMult, 3);
+    const p = 2483.42;
+    const lv = levelsFromAnchor(p, ETH, ETH.defaultFactor);
+    assert.equal(lv.buy, roundPrice(p / 1.008, 2));
+    assert.equal(lv.sell, roundPrice(p * 1.008 ** 1.1, 2));
+    const s = createInitialState({ market: ETH, startingEquity: 500 });
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: p,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 0, entry: 0 },
+        orders: [],
+      }),
+    });
+    const buy = downLevel(s.lastFillPrice ?? p, ETH.defaultFactor, ETH.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
   });
 
   it("first run with no lastFill seeds from mark and places −1 buy", () => {

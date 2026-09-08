@@ -915,13 +915,25 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel_all" && String(a.why).includes("spacing")));
   });
 
-  it("impulse cool far from last fill rests a mid LIMIT until fill (never market)", () => {
+  it("impulse cool far places mid LIMIT as lastFill, keeps leftovers, ±1 still runs", () => {
     const s = createInitialState({ startingEquity: 8000 });
     const t0 = 100_000;
     for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
     s.lastFillPrice = 0.7;
     s.lastFillAt = t0;
     s.position = { size: -baseQty(0.7), entry: 0.7 };
+    const leftoverBuy = pair(0.7).buy;
+    s.orders = [
+      {
+        id: "old-buy",
+        side: "buy",
+        price: leftoverBuy,
+        qty: 34.9,
+        notional: 25,
+        placedAt: t0,
+        mine: true,
+      },
+    ];
     setArmed(s, true);
     run(s, 0.73, t0 + 50_000);
     assert.equal(s.impulse, "buy");
@@ -938,22 +950,24 @@ describe("engine cycle", () => {
       catchActions.find((a) => a.type === "place" && a.exec === "market"),
       undefined,
     );
-    const lim = catchActions.find((a) => a.type === "place");
+    assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "old-buy"));
+    assert.ok(s.orders.some((o) => o.id === "old-buy" && o.holdUntilFill));
+    const lim = catchActions.find((a) => a.type === "place" && Math.abs(a.price - 0.73) < 1e-8);
     assert.ok(lim && lim.type === "place");
     assert.equal(lim.side, "sell");
-    assert.ok(lim.qty > baseQty(0.73));
-    assert.ok(Math.abs(lim.price - 0.73) < 1e-8);
-    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell"));
-    assert.equal(s.lastFillPrice, 0.7);
-    const around = pair(0.7);
+    assert.ok(lim.qty > 8 * baseQty(0.73) - 1e-6, "no 8-step cap");
+    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - 0.73) < 1e-8));
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - 0.73) < 1e-8);
+    const around = pair(0.73);
     assert.ok(
       catchActions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - around.buy) < 1e-8),
-      "±1 buy around last fill while bunch rests",
+      "±1 around new lastFill (mid)",
     );
-    const holdId = s.orders.find((o) => o.holdUntilFill)?.id;
-    run(s, 0.73, t0 + 200_000);
-    assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill));
-    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === holdId));
+    const holdId = s.orders.find((o) => o.holdUntilFill && Math.abs(o.price - 0.73) < 1e-8)?.id;
+    run(s, around.buy, t0 + 200_000);
+    assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill), "bunch still resting after ±1 fill");
+    assert.ok(s.orders.some((o) => o.id === "old-buy" && o.holdUntilFill));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && (a.orderId === holdId || a.orderId === "old-buy")));
   });
 
   it("impulse cool near last fill uses a limit at mark then ±1", () => {

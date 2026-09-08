@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AUDUSD, ETH, NATGAS, SPCX, TSLA } from "./markets.ts";
+import { AUDUSD, ETH, GEV, NATGAS, SPCX, TSLA } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -1212,6 +1212,33 @@ describe("SPCX accumulate", () => {
       }),
     });
     const buy = downLevel(s.lastFillPrice ?? p, ETH.defaultFactor, ETH.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
+  });
+
+  it("GEV uses 0.80% / 10x accumulate, $25 ticket, 1-decimal price", () => {
+    assert.equal(GEV.marketId, 218);
+    assert.equal(GEV.maxLeverage, 10);
+    assert.equal(GEV.orderNotional, 25);
+    assert.equal(GEV.defaultFactor, 1.008);
+    assert.equal(GEV.impulseCoolPct, 0.4);
+    assert.equal(GEV.priceDecimals, 1);
+    const p = 953.8;
+    const lv = levelsFromAnchor(p, GEV, GEV.defaultFactor);
+    assert.equal(lv.buy, roundPrice(p / 1.008, 1));
+    assert.equal(lv.sell, roundPrice(p * 1.008 ** 1.1, 1));
+    const s = createInitialState({ market: GEV, startingEquity: 500 });
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: p,
+      live: liveAccount({
+        equity: 500,
+        position: { size: 0, entry: 0 },
+        orders: [],
+      }),
+    });
+    const buy = downLevel(s.lastFillPrice ?? p, GEV.defaultFactor, GEV.priceDecimals);
     assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
   });

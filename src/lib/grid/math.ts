@@ -31,6 +31,23 @@ export function downLevel(price: number, factor: number, priceDecimals = PRICE_D
   return roundPrice(price / factor, priceDecimals);
 }
 
+export function tpFactorOf(market: MarketProfile, entryFactor: number): number {
+  return market.tpFactor && market.tpFactor > 1 ? market.tpFactor : entryFactor;
+}
+
+export function levelsFromAnchor(
+  anchor: number,
+  market: MarketProfile,
+  entryFactor: number,
+): { sell: number; buy: number } {
+  const d = market.priceDecimals;
+  const tpF = tpFactorOf(market, entryFactor);
+  if (market.prefer === "long") {
+    return { buy: downLevel(anchor, entryFactor, d), sell: upLevel(anchor, tpF, d) };
+  }
+  return { sell: upLevel(anchor, entryFactor, d), buy: downLevel(anchor, tpF, d) };
+}
+
 export function proximityPct(spacingPct: number, market: MarketProfile = AUDUSD): number {
   return market.proximityMult * spacingPct;
 }

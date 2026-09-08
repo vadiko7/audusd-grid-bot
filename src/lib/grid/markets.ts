@@ -15,6 +15,9 @@ export type MarketProfile = {
   sizeDecimals: number;
   defaultSpacingPct: number;
   defaultFactor: number;
+  /** Take-profit side factor (sell for longs, buy for shorts). Defaults to defaultFactor. */
+  tpSpacingPct?: number;
+  tpFactor?: number;
   atrSpacingMult: number;
   spacingMinPct: number;
   spacingMaxPct: number;
@@ -87,6 +90,8 @@ export const NATGAS: MarketProfile = {
   sizeDecimals: 2,
   defaultSpacingPct: 0.5,
   defaultFactor: 1.005,
+  tpSpacingPct: 1.1,
+  tpFactor: 1.011,
   atrSpacingMult: 0.55,
   spacingMinPct: 0.5,
   spacingMaxPct: 0.5,
@@ -119,6 +124,8 @@ export const SPCX: MarketProfile = {
   sizeDecimals: 4,
   defaultSpacingPct: 1.0,
   defaultFactor: 1.01,
+  tpSpacingPct: 1.1,
+  tpFactor: 1.011,
   atrSpacingMult: 0.55,
   spacingMinPct: 1.0,
   spacingMaxPct: 1.0,
@@ -154,6 +161,8 @@ export const TSLA: MarketProfile = {
   sizeDecimals: 4,
   defaultSpacingPct: 0.75,
   defaultFactor: 1.0075,
+  tpSpacingPct: 1.1,
+  tpFactor: 1.011,
   atrSpacingMult: 0.55,
   spacingMinPct: 0.75,
   spacingMaxPct: 0.75,

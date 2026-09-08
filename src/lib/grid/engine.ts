@@ -15,12 +15,14 @@ import {
   baseQty,
   downLevel,
   inProximity,
+  levelsFromAnchor,
   proximityPct,
   roundPrice,
   roundQty,
   sameRung,
   signedSize,
   stepsAway,
+  tpFactorOf,
   upLevel,
 } from "./math.ts";
 import type {
@@ -231,8 +233,11 @@ function inferLastFill(state: EngineState, orders: GridOrder[]): number | null {
   if (buys.length >= 1 && sells.length >= 1) {
     const buy = buys.reduce((a, b) => (a.price > b.price ? a : b));
     const sell = sells.reduce((a, b) => (a.price < b.price ? a : b));
-    const steps = stepsAway(buy.price, sell.price, f);
-    if (Math.abs(steps - 2) < 0.35) return upLevel(buy.price, f, m.priceDecimals);
+    const fromBuy = upLevel(buy.price, f, m.priceDecimals);
+    const fromSell = downLevel(sell.price, tpFactorOf(m, f), m.priceDecimals);
+    if (sameRung(fromBuy, fromSell, f) || Math.abs(fromBuy - fromSell) / Math.max(fromBuy, 1e-9) < 0.002) {
+      return fromBuy;
+    }
   }
   if (!(state.mark > 0)) return null;
   const nearest = [...live].sort((a, b) => Math.abs(a.price - state.mark) - Math.abs(b.price - state.mark))[0];
@@ -251,9 +256,7 @@ function anchorPrice(state: EngineState): number {
 }
 
 export function validLevels(state: EngineState): { sell: number; buy: number } {
-  const a = anchorPrice(state);
-  const m = state.config.market;
-  return { sell: upLevel(a, state.factor, m.priceDecimals), buy: downLevel(a, state.factor, m.priceDecimals) };
+  return levelsFromAnchor(anchorPrice(state), state.config.market, state.factor);
 }
 
 function detectFills(state: EngineState): Fill[] {
@@ -707,8 +710,9 @@ function accumulateTargets(state: EngineState): { side: Side; price: number }[] 
     out.push({ side: "sell", price: levels.sell });
     if (state.impulse === "buy") {
       let px = levels.sell;
+      const tpF = tpFactorOf(m, state.factor);
       for (let i = 0; i < 5; i++) {
-        px = upLevel(px, state.factor, m.priceDecimals);
+        px = upLevel(px, tpF, m.priceDecimals);
         if (px <= state.mark) continue;
         if (!plusPnlSell(state, px)) continue;
         out.push({ side: "sell", price: px });
@@ -726,8 +730,9 @@ function harvestRipSells(state: EngineState) {
   let px = levels.sell;
   let remaining = Math.abs(state.position.size);
   for (const o of state.orders.filter((x) => isMineOrder(x) && x.side === "sell")) remaining -= o.qty;
+  const tpF = tpFactorOf(m, state.factor);
   for (let i = 0; i < 6 && remaining > 1e-6; i++) {
-    if (i > 0) px = upLevel(px, state.factor, m.priceDecimals);
+    if (i > 0) px = upLevel(px, tpF, m.priceDecimals);
     if (px <= state.mark) continue;
     if (!plusPnlSell(state, px)) continue;
     if (hasNear(state, px, "sell")) continue;
@@ -860,8 +865,7 @@ export function maintainPair(state: EngineState, why: string) {
 
 function postFillMissed(state: EngineState, fill: Fill) {
   const m = state.config.market;
-  const up = upLevel(fill.price, state.factor, m.priceDecimals);
-  const down = downLevel(fill.price, state.factor, m.priceDecimals);
+  const { sell: up, buy: down } = levelsFromAnchor(fill.price, m, state.factor);
   const keep: GridOrder[] = [];
   for (const order of state.orders) {
     if (!isMineOrder(order)) {

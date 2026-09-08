@@ -1094,8 +1094,12 @@ export function resetSession(state: EngineState): EngineState {
 function rememberLeftovers(state: EngineState, why: string) {
   let n = 0;
   const ids = new Set(state.holdIds);
+  const levels = validLevels(state);
   state.orders = state.orders.map((o) => {
     if (!isMineOrder(o) || isHoldOrder(o)) return o;
+    const onPair =
+      sameRung(o.price, levels.buy, state.factor) || sameRung(o.price, levels.sell, state.factor);
+    if (onPair) return o;
     n += 1;
     if (!o.id.startsWith("pending:")) ids.add(o.id);
     return { ...o, holdUntilFill: true };
@@ -1103,6 +1107,31 @@ function rememberLeftovers(state: EngineState, why: string) {
   state.holdIds = [...ids];
   if (n) pushLog(state, "impulse", `remember ${n} leftover limit(s) until fill — ${why}`);
 }
+
+function cancelPreImpulsePair(state: EngineState) {
+  const levels = validLevels(state);
+  const keep: GridOrder[] = [];
+  let n = 0;
+  for (const o of state.orders) {
+    if (!isMineOrder(o) || isHoldOrder(o)) {
+      keep.push(o);
+      continue;
+    }
+    const onPair =
+      sameRung(o.price, levels.buy, state.factor) || sameRung(o.price, levels.sell, state.factor);
+    if (!onPair) {
+      keep.push(o);
+      continue;
+    }
+    dropOrder(state, o, "pre-impulse ±1 leftover");
+    n += 1;
+  }
+  state.orders = keep;
+  if (n) pushLog(state, "clean", `clean ${n} pre-impulse ±1 leftover(s) — other limits held until fill`);
+}
+
+const BUNCH_CAP_LEVELS = 8;
+const BUNCH_LEAVE_LEVELS = 8;
 
 function impulseCoolCatch(state: EngineState): void {
   if (!state.impulseJustCooled) return;
@@ -1124,8 +1153,11 @@ function impulseCoolCatch(state: EngineState): void {
     );
     return;
   }
-  if (state.orders.some((o) => isHoldOrder(o) && o.price === roundPrice(state.mark, m.priceDecimals))) {
+  const mid = roundPrice(state.mark, m.priceDecimals);
+  if (state.orders.some((o) => isHoldOrder(o) && sameRung(o.price, mid, state.factor))) {
     pushLog(state, "impulse", "impulse cool — bunch already resting at mid until fill");
+    state.lastFillPrice = mid;
+    state.lastFillAt = state.now;
     return;
   }
   const side: Side = state.mark > anchor ? "sell" : "buy";
@@ -1142,46 +1174,57 @@ function impulseCoolCatch(state: EngineState): void {
     return;
   }
   const rawSteps = stepsAway(anchor, state.mark, state.factor);
-  const nLevels = Math.max(1, Math.round(rawSteps));
+  const nLevels = Math.max(1, Math.min(BUNCH_CAP_LEVELS, Math.round(rawSteps)));
   const oneUsd = acc && side === "sell" ? sellTicketUsd(state, state.mark) : state.config.orderNotional;
   const one = baseQty(state.mark, oneUsd, m.sizeDecimals);
   if (one <= 0) return;
   const reducing = (state.position.size < 0 && side === "buy") || (state.position.size > 0 && side === "sell");
+  const leaveQty = roundQty(one * BUNCH_LEAVE_LEVELS, m.sizeDecimals);
   let qty = roundQty(one * nLevels, m.sizeDecimals);
   let reduceOnly = false;
   if (reducing || (acc && side === "sell")) {
     const pos = Math.abs(state.position.size);
-    if (pos + 1e-12 < one) {
-      pushLog(state, "impulse", `impulse cool not enough to reduce (${pos.toFixed(m.sizeDecimals)}) — continue as is`);
+    const available = roundQty(pos - leaveQty, m.sizeDecimals);
+    if (available + 1e-12 < one) {
+      pushLog(
+        state,
+        "impulse",
+        `impulse cool not enough to reduce and leave ${BUNCH_LEAVE_LEVELS} lvl (${pos.toFixed(m.sizeDecimals)}) — continue as is`,
+      );
       return;
     }
-    qty = roundQty(Math.min(qty, pos), m.sizeDecimals);
+    qty = roundQty(Math.min(qty, available), m.sizeDecimals);
     reduceOnly = true;
   } else {
     let remaining = remainingCapacity(state);
     if (acc && side === "buy") {
       remaining = Math.min(remaining, Math.max(0, buyCapUsd(state) - buyUsedUsd(state)));
     }
-    const maxQty = baseQty(state.mark, remaining, m.sizeDecimals);
-    qty = roundQty(Math.min(qty, maxQty), m.sizeDecimals);
+    const remainingQty = baseQty(state.mark, remaining, m.sizeDecimals);
+    const available = roundQty(remainingQty - leaveQty, m.sizeDecimals);
+    if (available + 1e-12 < one) {
+      pushLog(state, "impulse", `impulse cool not enough room to leave ${BUNCH_LEAVE_LEVELS} lvl — continue as is`);
+      return;
+    }
+    qty = roundQty(Math.min(qty, available), m.sizeDecimals);
   }
   if (qty <= 0) {
     pushLog(state, "impulse", "impulse cool bunch skipped — no size, continue as is");
     return;
   }
   qty = liftQtyToMins(state, qty, state.mark);
-  if (reduceOnly && qty > Math.abs(state.position.size) + 1e-12) {
+  if (reduceOnly && qty > Math.abs(state.position.size) - leaveQty + 1e-12) {
     pushLog(state, "impulse", "impulse cool not enough to reduce after min clip — continue as is");
     return;
   }
   if (!meetsExchangeMins(state, qty, state.mark)) {
-    pushLog(state, "impulse", `impulse cool skip — qty below Lighter min, continue as is`);
+    pushLog(state, "impulse", "impulse cool skip — qty below Lighter min, continue as is");
     return;
   }
-  const price = roundPrice(state.mark, m.priceDecimals);
+  cancelPreImpulsePair(state);
   const why = `impulse-cool bunch ${nLevels} lvl @ mid`;
   if (
-    !placeLimit(state, side, price, why, {
+    !placeLimit(state, side, mid, why, {
       qty,
       reduceOnly,
       allowExtra: true,
@@ -1191,15 +1234,15 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", "impulse cool bunch not placed — continue as is");
     return;
   }
-  state.lastFillPrice = price;
+  state.lastFillPrice = mid;
   state.lastFillSide = side;
   state.lastFillAt = state.now;
-  if (acc) ratchetHighest(state, price, "cool bunch placed");
+  if (acc) ratchetHighest(state, mid, "cool bunch placed");
   pushLog(
     state,
     "place",
-    `impulse cool LIMIT ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} missed lvl · Δ ${distPct.toFixed(2)}% > prox ${prox.toFixed(2)}% — lastFill now mid, hold until fill`,
-    { side, price, qty, exec: "limit", n: nLevels, distPct, prox, hold: true },
+    `impulse cool LIMIT ${side.toUpperCase()} ${mid.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} lvl (cap ${BUNCH_CAP_LEVELS}, leave ${BUNCH_LEAVE_LEVELS}) · Δ ${distPct.toFixed(2)}% — lastFill now mid, hold until fill`,
+    { side, price: mid, qty, exec: "limit", n: nLevels, distPct, prox, hold: true },
   );
 }
 
@@ -1210,6 +1253,8 @@ function runArmedCycle(state: EngineState) {
   let waitFill = false;
   if (state.impulseJustCooled) {
     /* distance handled by impulseCoolCatch */
+  } else if (state.impulse !== "none") {
+    if (isAccumulate(state) && state.impulse === "buy") harvestRipSells(state);
   } else if (isAccumulate(state) && anchor) {
     cleanInvalid(state);
     if (state.impulse === "buy") harvestRipSells(state);

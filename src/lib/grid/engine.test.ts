@@ -915,19 +915,28 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel_all" && String(a.why).includes("spacing")));
   });
 
-  it("impulse cool far places mid LIMIT as lastFill, keeps leftovers, ±1 still runs", () => {
+  it("impulse cool far places mid LIMIT as lastFill, cancels only pre-impulse ±1, keeps other leftovers", () => {
     const s = createInitialState({ startingEquity: 8000 });
     const t0 = 100_000;
     for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
     s.lastFillPrice = 0.7;
     s.lastFillAt = t0;
-    s.position = { size: -baseQty(0.7), entry: 0.7 };
-    const leftoverBuy = pair(0.7).buy;
+    s.position = { size: -20 * baseQty(0.7), entry: 0.7 };
+    const pairOld = pair(0.7);
     s.orders = [
       {
-        id: "old-buy",
+        id: "pair-buy",
         side: "buy",
-        price: leftoverBuy,
+        price: pairOld.buy,
+        qty: 34.9,
+        notional: 25,
+        placedAt: t0,
+        mine: true,
+      },
+      {
+        id: "old-extra",
+        side: "buy",
+        price: 0.68,
         qty: 34.9,
         notional: 25,
         placedAt: t0,
@@ -950,12 +959,15 @@ describe("engine cycle", () => {
       catchActions.find((a) => a.type === "place" && a.exec === "market"),
       undefined,
     );
-    assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "old-buy"));
-    assert.ok(s.orders.some((o) => o.id === "old-buy" && o.holdUntilFill));
+    assert.ok(catchActions.some((a) => a.type === "cancel" && a.orderId === "pair-buy"));
+    assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
+    assert.ok(s.orders.some((o) => o.id === "old-extra" && o.holdUntilFill));
+    const one = baseQty(0.73);
     const lim = catchActions.find((a) => a.type === "place" && Math.abs(a.price - 0.73) < 1e-8);
     assert.ok(lim && lim.type === "place");
     assert.equal(lim.side, "sell");
-    assert.ok(lim.qty > 8 * baseQty(0.73) - 1e-6, "no 8-step cap");
+    assert.ok(lim.qty <= 8 * one + 1e-6, "cap 8 from mid");
+    assert.ok(lim.qty >= 7 * one, "bunch uses the 8-level cap");
     assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - 0.73) < 1e-8));
     assert.ok(Math.abs((s.lastFillPrice ?? 0) - 0.73) < 1e-8);
     const around = pair(0.73);
@@ -966,8 +978,24 @@ describe("engine cycle", () => {
     const holdId = s.orders.find((o) => o.holdUntilFill && Math.abs(o.price - 0.73) < 1e-8)?.id;
     run(s, around.buy, t0 + 200_000);
     assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill), "bunch still resting after ±1 fill");
-    assert.ok(s.orders.some((o) => o.id === "old-buy" && o.holdUntilFill));
-    assert.ok(!s.actions.some((a) => a.type === "cancel" && (a.orderId === holdId || a.orderId === "old-buy")));
+    assert.ok(s.orders.some((o) => o.id === "old-extra" && o.holdUntilFill));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && (a.orderId === holdId || a.orderId === "old-extra")));
+  });
+
+  it("impulse cool reducing bunch skipped when it cannot leave 8 levels", () => {
+    const s = createInitialState({ startingEquity: 8000 });
+    const t0 = 100_000;
+    for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
+    s.lastFillPrice = 0.7;
+    s.lastFillAt = t0;
+    s.position = { size: -3 * baseQty(0.7), entry: 0.7 };
+    setArmed(s, true);
+    run(s, 0.68, t0 + 50_000);
+    assert.equal(s.impulse, "sell");
+    for (let i = 1; i <= 35; i++) run(s, 0.68, t0 + 50_000 + i * 2_000);
+    assert.equal(s.impulse, "none");
+    assert.ok(!s.orders.some((o) => o.holdUntilFill && Math.abs(o.price - 0.68) < 1e-6));
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - 0.7) < 1e-8);
   });
 
   it("impulse cool near last fill uses a limit at mark then ±1", () => {

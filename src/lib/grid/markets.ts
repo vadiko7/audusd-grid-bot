@@ -308,6 +308,45 @@ export const XAU: MarketProfile = {
   minBaseAmount: 0.002,
 };
 
+/** BTC long accumulate — $25, 0.60% entry, 50x, cap 3× equity */
+export const BTC: MarketProfile = {
+  symbol: "BTC",
+  marketId: 1,
+  prefer: "long",
+  strategy: "accumulate",
+  maxLeverage: 50,
+  orderNotional: 25,
+  priceDecimals: 1,
+  sizeDecimals: 5,
+  defaultSpacingPct: 0.6,
+  defaultFactor: 1.006,
+  tpSteps: 1.1,
+  tpFactor: 1.0066,
+  atrSpacingMult: 0.55,
+  spacingMinPct: 0.6,
+  spacingMaxPct: 0.6,
+  spacingChangeThresholdPct: 0.15,
+  lowSpacingPct: 0.6,
+  highSpacingPct: 0.6,
+  regimeLow: 2.5,
+  regimeHigh: 5.0,
+  regimeExtreme: 8.0,
+  impulseTriggerPct: 1.0,
+  impulseCoolPct: 0.3,
+  impulseWindowMs: 50_000,
+  proximityMult: 1.25,
+  proximityMinPct: 0.75,
+  proximityMaxPct: 0.75,
+  adverseSteps: 8,
+  baseCycleMs: 2_000,
+  elevatedCycleMs: 250,
+  buyCapEquityMult: 3,
+  harvestSellFrac: 0.25,
+  reloadSellFrac: 0.9,
+  minQuoteNotional: 13,
+  minBaseAmount: 0.0001,
+};
+
 export const MARKETS: Record<string, MarketProfile> = {
   AUDUSD,
   NATGAS,
@@ -316,17 +355,18 @@ export const MARKETS: Record<string, MarketProfile> = {
   ETH,
   GEV,
   XAU,
+  BTC,
 };
 
 export function parseMarkets(raw: string | undefined): MarketProfile[] {
-  const names = (raw || "AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU")
+  const names = (raw || "AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC")
     .split(",")
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
   const out: MarketProfile[] = [];
   for (const name of names) {
     const m = MARKETS[name];
-    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS, SPCX, TSLA, ETH, GEV, XAU)`);
+    if (!m) throw new Error(`unknown market ${name} (AUDUSD, NATGAS, SPCX, TSLA, ETH, GEV, XAU, BTC)`);
     if (!out.some((x) => x.symbol === m.symbol)) out.push(m);
   }
   if (out.length === 0) throw new Error("MARKETS is empty");

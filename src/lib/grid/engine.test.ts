@@ -945,6 +945,11 @@ describe("engine cycle", () => {
     assert.ok(Math.abs(lim.price - 0.73) < 1e-8);
     assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell"));
     assert.equal(s.lastFillPrice, 0.7);
+    const around = pair(0.7);
+    assert.ok(
+      catchActions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - around.buy) < 1e-8),
+      "±1 buy around last fill while bunch rests",
+    );
     const holdId = s.orders.find((o) => o.holdUntilFill)?.id;
     run(s, 0.73, t0 + 200_000);
     assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill));

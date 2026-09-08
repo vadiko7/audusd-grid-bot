@@ -581,10 +581,12 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
   }
 
   if (!opts.allowExtra) {
-    if (state.orders.filter((o) => isMineOrder(o) && o.side === side).length >= 1) {
+    const sameSide = state.orders.filter((o) => isMineOrder(o) && !isHoldOrder(o) && o.side === side).length;
+    if (sameSide >= 1) {
       return { reason: `already have a ${side} (max 1 per side)` };
     }
-    if (!acc && state.orders.filter(isMineOrder).length >= 2) {
+    const working = state.orders.filter((o) => isMineOrder(o) && !isHoldOrder(o)).length;
+    if (!acc && working >= 2) {
       return { reason: "max 2 working bot orders" };
     }
   }
@@ -1128,7 +1130,7 @@ function impulseCoolCatch(state: EngineState): void {
     return;
   }
   const rawSteps = stepsAway(anchor, state.mark, state.factor);
-  const nLevels = Math.max(1, Math.min(8, Math.round(rawSteps)));
+  const nLevels = Math.max(1, Math.round(rawSteps));
   const oneUsd = acc && side === "sell" ? sellTicketUsd(state, state.mark) : state.config.orderNotional;
   const one = baseQty(state.mark, oneUsd, m.sizeDecimals);
   if (one <= 0) return;
@@ -1217,7 +1219,7 @@ function runArmedCycle(state: EngineState) {
     impulseCoolCatch(state);
   }
 
-  if (!waitFill && !state.orders.some(isHoldOrder)) maintainPair(state, "maintain ±1");
+  if (!waitFill) maintainPair(state, "maintain ±1");
 }
 
 export function step(state: EngineState, input: StepInput): EngineState {

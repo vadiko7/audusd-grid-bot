@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AUDUSD, BTC, ETH, GEV, NATGAS, SPCX, TSLA, XAU } from "./markets.ts";
+import { AUDUSD, BTC, ETH, GEV, MARKETS, NATGAS, SPCX, TSLA, XAU } from "./markets.ts";
 import { DEFAULT_FACTOR, DEFAULT_SPACING_PCT, ORDER_NOTIONAL } from "./constants.ts";
 import {
   createInitialState,
@@ -86,6 +86,14 @@ describe("geometry", () => {
     const spx = levelsFromAnchor(140, SPCX, SPCX.defaultFactor);
     assert.equal(spx.buy, roundPrice(140 / 1.01, 2));
     assert.equal(spx.sell, roundPrice(140 * 1.01 ** 1.1, 2));
+  });
+
+  it("every book uses proximity = 1.25 × spacing", () => {
+    for (const m of Object.values(MARKETS)) {
+      assert.equal(m.proximityMult, 1.25, m.symbol);
+      assert.equal(m.proximityMinPct, m.proximityMult * m.defaultSpacingPct, m.symbol);
+      assert.equal(m.proximityMaxPct, m.proximityMinPct, m.symbol);
+    }
   });
 });
 
@@ -1228,6 +1236,8 @@ describe("SPCX accumulate", () => {
     assert.equal(TSLA.defaultFactor, 1.0075);
     assert.equal(TSLA.tpSteps, 1.1);
     assert.equal(TSLA.impulseCoolPct, 0.4);
+    assert.equal(TSLA.proximityMinPct, 0.9375);
+    assert.equal(TSLA.proximityMult, 1.25);
     const p = 350;
     assert.equal(upLevel(p, TSLA.defaultFactor, TSLA.priceDecimals), roundPrice(p * 1.0075, 2));
     assert.equal(levelsFromAnchor(p, TSLA, TSLA.defaultFactor).sell, roundPrice(p * 1.0075 ** 1.1, 2));
@@ -1259,6 +1269,8 @@ describe("SPCX accumulate", () => {
     assert.equal(ETH.impulseTriggerPct, 1.25);
     assert.equal(ETH.impulseCoolPct, 0.4);
     assert.equal(ETH.buyCapEquityMult, 3);
+    assert.equal(ETH.proximityMinPct, 1.0);
+    assert.equal(ETH.proximityMult, 1.25);
     const p = 2483.42;
     const lv = levelsFromAnchor(p, ETH, ETH.defaultFactor);
     assert.equal(lv.buy, roundPrice(p / 1.008, 2));
@@ -1286,6 +1298,7 @@ describe("SPCX accumulate", () => {
     assert.equal(GEV.defaultFactor, 1.008);
     assert.equal(GEV.impulseCoolPct, 0.4);
     assert.equal(GEV.priceDecimals, 1);
+    assert.equal(GEV.proximityMinPct, 1.0);
     const p = 953.8;
     const lv = levelsFromAnchor(p, GEV, GEV.defaultFactor);
     assert.equal(lv.buy, roundPrice(p / 1.008, 1));

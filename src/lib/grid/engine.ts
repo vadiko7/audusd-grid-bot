@@ -638,6 +638,10 @@ function expectedFillPnl(state: EngineState, side: Side, price: number, qty: num
   };
 }
 
+function isTpSide(state: EngineState, side: Side): boolean {
+  return state.config.market.prefer === "long" ? side === "sell" : side === "buy";
+}
+
 function placeLimit(state: EngineState, side: Side, target: number, why: string, opts: PlaceOpts = {}): boolean {
   const m = state.config.market;
   const price = roundPrice(target, m.priceDecimals);
@@ -654,6 +658,16 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
     const usd = sellTicketUsd(state, price);
     qty = opts.qty ?? baseQty(price, usd, m.sizeDecimals);
     reduceOnly = true;
+  }
+  if (isTpSide(state, side)) {
+    reduceOnly = true;
+    const maxClose = Math.abs(state.position.size);
+    if (maxClose <= 1e-12) {
+      pushLog(state, "gate", `gate ${side.toUpperCase()} ${price.toFixed(m.priceDecimals)} — TP reduce-only, no position`);
+      return false;
+    }
+    qty = roundQty(Math.min(qty, maxClose), m.sizeDecimals);
+    if (qty <= 0) return false;
   }
   qty = liftQtyToMins(state, qty, price);
   if (isAccumulate(state) && side === "sell") {
@@ -899,8 +913,8 @@ export function maintainPair(state: EngineState, why: string) {
   }
   const levels = validLevels(state);
   const m = state.config.market;
-  const needSell = !hasNear(state, levels.sell, "sell");
-  const needBuy = !isFlat(state) && !hasNear(state, levels.buy, "buy");
+  const needSell = (m.prefer === "short" || !isFlat(state)) && !hasNear(state, levels.sell, "sell");
+  const needBuy = (m.prefer === "long" || !isFlat(state)) && !hasNear(state, levels.buy, "buy");
   if (why.startsWith("arm") || needSell || needBuy) {
     pushLog(
       state,

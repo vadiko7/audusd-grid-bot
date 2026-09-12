@@ -91,16 +91,16 @@ export const NATGAS: MarketProfile = {
   orderNotional: 25,
   priceDecimals: 4,
   sizeDecimals: 2,
-  defaultSpacingPct: 0.5,
-  defaultFactor: 1.005,
+  defaultSpacingPct: 2.0,
+  defaultFactor: 1.02,
   tpSteps: 1.1,
-  tpFactor: 1.0055,
+  tpFactor: 1.022,
   atrSpacingMult: 0.55,
-  spacingMinPct: 0.5,
-  spacingMaxPct: 0.5,
+  spacingMinPct: 2.0,
+  spacingMaxPct: 2.0,
   spacingChangeThresholdPct: 0.15,
-  lowSpacingPct: 0.5,
-  highSpacingPct: 0.5,
+  lowSpacingPct: 2.0,
+  highSpacingPct: 2.0,
   regimeLow: 2.5,
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
@@ -108,8 +108,8 @@ export const NATGAS: MarketProfile = {
   impulseCoolPct: 0.3,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
-  proximityMinPct: 0.4,
-  proximityMaxPct: 1.0,
+  proximityMinPct: 2.5,
+  proximityMaxPct: 2.5,
   adverseSteps: 1.75,
   baseCycleMs: 2_000,
   elevatedCycleMs: 300,
@@ -359,7 +359,7 @@ export const MARKETS: Record<string, MarketProfile> = {
 };
 
 export function parseMarkets(raw: string | undefined): MarketProfile[] {
-  const names = (raw || "AUDUSD,NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC")
+  const names = (raw || "NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC")
     .split(",")
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);

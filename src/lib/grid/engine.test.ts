@@ -81,8 +81,8 @@ describe("geometry", () => {
     assert.equal(aud.sell, roundPrice(p * 1.001));
     assert.equal(aud.buy, roundPrice(p / 1.001 ** 1.1));
     const gas = levelsFromAnchor(2.9, NATGAS, NATGAS.defaultFactor);
-    assert.equal(gas.buy, roundPrice(2.9 / 1.005, 4));
-    assert.equal(gas.sell, roundPrice(2.9 * 1.005 ** 1.1, 4));
+    assert.equal(gas.buy, roundPrice(2.9 / 1.02, 4));
+    assert.equal(gas.sell, roundPrice(2.9 * 1.02 ** 1.1, 4));
     const spx = levelsFromAnchor(140, SPCX, SPCX.defaultFactor);
     assert.equal(spx.buy, roundPrice(140 / 1.01, 2));
     assert.equal(spx.sell, roundPrice(140 * 1.01 ** 1.1, 2));
@@ -845,6 +845,9 @@ describe("engine cycle", () => {
     const prices = s.orders.map((o) => o.price);
     assert.ok(prices.includes(levelsFromAnchor(seedPx, NATGAS, NATGAS.defaultFactor).sell));
     assert.ok(prices.includes(downLevel(seedPx, NATGAS.defaultFactor, NATGAS.priceDecimals)));
+    const tp = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(tp && tp.type === "place");
+    assert.equal(tp.reduceOnly, true);
   });
 
   it("freezes all new limits during impulse so a walk cannot staircase", () => {

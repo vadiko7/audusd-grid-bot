@@ -1468,8 +1468,8 @@ describe("portfolio sleeves", () => {
     s.accountSource = "sim";
     s.accountEquity = 10_000;
     s.mark = 150;
-    assert.equal(Math.round(sleeveUsd(s)), 1782);
-    assert.equal(Math.round(buyCapUsd(s)), 5346);
+    assert.equal(Math.round(sleeveUsd(s)), 1980);
+    assert.equal(Math.round(buyCapUsd(s)), 5940);
   });
 
   it("underweight snaps highest_lvl to mark and sells 25%", () => {

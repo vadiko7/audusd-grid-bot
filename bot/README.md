@@ -3,7 +3,7 @@
 NATGAS + **SPCX**, **TSLA**, **ETH**, **GEV**, **XAU**, and **BTC** long accumulate. Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
 
-`MARKETS=NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default; AUDUSD off). Sleeves from **90% of Lighter full equity** (off-exchange cash ignored). Buy cap is **sleeve × 3** only — no cash-floor halt. Weights / bands: SPCX 19.8% (18–28), GEV 18% (16–24), XAU 16.2% (14–23), TSLA 11.7% (10–17), BTC 9.9% (8–15), NATGAS 8.1% (6–12), ETH 6.3% (5–10). Underweight (`w ≤ band_low`): `highest_lvl := mark`, every reduce-only sell is 25%. In/above band: ATH ratchets up only; sell ≥ ATH 25%, below 90%. `band_high` is informational. Entry 1 step; TP 1.1 steps reduce-only. Proximity **1.25 × spacing**. NATGAS 2.00%. Ticket $25, harvest floor $13. Impulse-cool catch-up is a **limit at mid**. Cap 8 levels from mid; leave 8 levels (no flip).
+`MARKETS=NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default; AUDUSD off). Sleeve = **full Lighter equity × weight** (10% cash unallocated, off-exchange ignored). Buy cap is **sleeve × 3** only — no cash-floor halt. On $10k: SPCX $1,980/$5,940 · GEV $1,800/$5,400 · XAU $1,620/$4,860 · TSLA $1,170/$3,510 · BTC $990/$2,970 · NATGAS $810/$2,430 · ETH $630/$1,890. Underweight (`w ≤ band_low`): `highest_lvl := mark`, every reduce-only sell is 25%. In/above band: ATH ratchets up only; sell ≥ ATH 25%, below 90%. `band_high` is informational. Entry 1 step; TP 1.1 steps reduce-only. Proximity **1.25 × spacing**. NATGAS 2.00%. Ticket $25, harvest floor $13. Impulse-cool catch-up is a **limit at mid**. Cap 8 levels from mid; leave 8 levels (no flip).
 
 ## First setup (VM)
 

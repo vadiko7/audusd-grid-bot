@@ -7,7 +7,7 @@ import {
   VELOCITY_SPIKE_PCT,
   VELOCITY_SPIKE_WINDOW_MS,
 } from "./constants.ts";
-import { AUDUSD, SLEEVE_EQUITY_FRAC } from "./markets.ts";
+import { AUDUSD } from "./markets.ts";
 import { resolveImpulse, velocityPct } from "./impulse.ts";
 import {
   adverseAgainstLong,
@@ -145,7 +145,7 @@ export function isAccumulate(state: EngineState): boolean {
 export function sleeveUsd(state: EngineState): number {
   const w = state.config.market.weight;
   if (w == null) return equity(state);
-  return Math.max(0, equity(state) * SLEEVE_EQUITY_FRAC * w);
+  return Math.max(0, equity(state) * w);
 }
 
 export function positionWeight(state: EngineState, mark = state.mark): number {

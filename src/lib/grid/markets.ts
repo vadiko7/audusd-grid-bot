@@ -53,8 +53,8 @@ export type MarketProfile = {
   bandHigh?: number;
 };
 
-/** Sleeve pool is 90% of Lighter full equity. Off-exchange cash is ignored. */
-export const SLEEVE_EQUITY_FRAC = 0.9;
+/** Unallocated cash sleeve as a fraction of Lighter full equity. Weights sum to 0.90; this is the rest. */
+export const CASH_SLEEVE_FRAC = 0.1;
 
 /** AUDUSD Short Geometric Grid */
 export const AUDUSD: MarketProfile = {

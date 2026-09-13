@@ -390,14 +390,22 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   } else {
     state.unackedPosDelta += posDelta;
   }
+  const eps = 1e-6;
   const vanished = prev.filter((order) => {
     if (!isMineOrder(order)) return false;
     if (nextIds.has(order.id)) return false;
     if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;
-    if (order.id.startsWith("pending:")) return false;
+    if (order.id.startsWith("pending:")) {
+      const onBook = liveOpen.some((o) => o.side === order.side && sameRung(o.price, order.price, state.factor));
+      if (onBook) return false;
+      const posMoved =
+        (order.side === "sell" && posDelta < -eps) || (order.side === "buy" && posDelta > eps);
+      const expired = state.now - order.placedAt > PENDING_MS;
+      if (posMoved || historyWouldHaveHit(state, order) || (expired && historyWouldHaveHit(state, order))) return true;
+      return false;
+    }
     return true;
   });
-  const eps = 1e-6;
   const dirOf = (o: GridOrder) => (o.side === "buy" ? 1 : -1);
   let budget = state.unackedPosDelta;
   const filledIds = new Set<string>();
@@ -461,7 +469,6 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   }
 
   const pending = prev.filter((o) => o.id.startsWith("pending:") && !cancelled.has(o.id) && !filledIds.has(o.id));
-  const PENDING_MS = 45_000;
   const stillPending = pending.filter((p) => {
     if (liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor))) return false;
     if (state.now - p.placedAt > PENDING_MS) {
@@ -555,16 +562,24 @@ function wouldHaveHit(order: GridOrder, mark: number, factor: number): boolean {
   return stepsAway(order.price, mark, factor) < 0.25;
 }
 
+function historyWouldHaveHit(state: EngineState, order: GridOrder): boolean {
+  if (wouldHaveHit(order, state.mark, state.factor)) return true;
+  return state.markHistory.some((t) => t.t >= order.placedAt - 1 && wouldHaveHit(order, t.p, state.factor));
+}
+
+const SOLD_RUNG_MS = 12 * 60 * 60 * 1000;
+const PENDING_MS = 45_000;
+
 function rememberSoldRung(state: EngineState, price: number) {
   const px = roundPrice(price, state.config.market.priceDecimals);
   state.soldRungs = [
-    ...state.soldRungs.filter((r) => state.now - r.at < 30 * 60_000 && !sameRung(r.price, px, state.factor)),
+    ...state.soldRungs.filter((r) => state.now - r.at < SOLD_RUNG_MS && !sameRung(r.price, px, state.factor)),
     { price: px, at: state.now },
-  ].slice(-24);
+  ].slice(-48);
 }
 
 function soldRungRecently(state: EngineState, price: number): boolean {
-  return state.soldRungs.some((r) => sameRung(r.price, price, state.factor) && state.now - r.at < 30 * 60_000);
+  return state.soldRungs.some((r) => sameRung(r.price, price, state.factor) && state.now - r.at < SOLD_RUNG_MS);
 }
 
 function hasNear(state: EngineState, target: number, side?: Side): boolean {

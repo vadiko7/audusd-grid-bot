@@ -437,6 +437,43 @@ describe("engine cycle", () => {
     assert.ok(sells.every((a) => Math.abs(a.price - nextSell) < 1e-4 || a.price > tp));
   });
 
+  it("pending sell that fills before live id is seen walks lastFill — no second sell at same TP", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 10_000 });
+    const last = 2.9465;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = last;
+    s.position = { size: 80, entry: last };
+    const tp = levelsFromAnchor(last, NATGAS, NATGAS.defaultFactor).sell;
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: last,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 80, entry: last },
+        positionNotional: 236,
+        orders: [],
+      }),
+    });
+    s.actions = [];
+    s.orders = [{ id: "pending:9", side: "sell", price: tp, qty: 7.52, notional: 22.49, placedAt: 2_000, mine: true }];
+    step(s, {
+      now: 4_000,
+      mark: roundPrice(tp * 1.0003, NATGAS.priceDecimals),
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 72.48, entry: last },
+        positionNotional: 216,
+        orders: [],
+      }),
+    });
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - tp) < 1e-6);
+    const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
+    assert.ok(!sells.some((a) => Math.abs(a.price - tp) < 1e-6), "must not re-sell the filled TP");
+    assert.ok(s.soldRungs.some((r) => Math.abs(r.price - tp) < 1e-6));
+  });
+
   it("pending ghost does not log order-gone and expires so ±1 can re-place", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;

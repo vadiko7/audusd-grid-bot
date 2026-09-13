@@ -77,6 +77,7 @@ type SavedSettings = {
       lastFillAt?: number;
       highestLvl?: number;
       holdOrderIds?: string[];
+      sold_rungs?: Array<{ price: number; at: number }>;
     }
   >;
   orderNotional?: number;
@@ -258,6 +259,7 @@ function saveSettings(book: {
     lastFillAt: number | null;
     highestLvl: number | null;
     holdIds: string[];
+    soldRungs: Array<{ price: number; at: number }>;
   };
 }) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
@@ -279,6 +281,7 @@ function saveSettings(book: {
     lastFillAt: book.engine.lastFillAt ?? undefined,
     highestLvl: book.engine.highestLvl ?? undefined,
     holdOrderIds: book.engine.holdIds.length ? book.engine.holdIds : undefined,
+    sold_rungs: book.engine.soldRungs.length ? book.engine.soldRungs : undefined,
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
@@ -356,6 +359,12 @@ function makeBook(market: MarketProfile): Book {
   if (Number.isFinite(hi) && hi > 0) engine.highestLvl = hi;
   const holds = saved.markets?.[market.symbol]?.holdOrderIds;
   if (Array.isArray(holds)) engine.holdIds = holds.filter((id) => typeof id === "string" && id.length > 0);
+  const sold = savedM?.sold_rungs;
+  if (Array.isArray(sold)) {
+    engine.soldRungs = sold
+      .filter((r) => r && Number(r.price) > 0 && Number(r.at) > 0)
+      .map((r) => ({ price: Number(r.price), at: Number(r.at) }));
+  }
   const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
@@ -550,7 +559,7 @@ async function tick() {
           mark: book.mark,
           live: book.live,
         });
-        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length) saveSettings(book);
       }
     }
     drainAndSend();
@@ -752,7 +761,7 @@ async function main() {
           `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
-        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length) saveSettings(book);
         for (const l of book.engine.logs.slice(-8)) {
           if (
             l.level === "gate" ||

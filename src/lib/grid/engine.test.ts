@@ -84,8 +84,8 @@ describe("geometry", () => {
     assert.equal(aud.sell, roundPrice(p * 1.001));
     assert.equal(aud.buy, roundPrice(p / 1.001 ** 1.1));
     const gas = levelsFromAnchor(2.9, NATGAS, NATGAS.defaultFactor);
-    assert.equal(gas.buy, roundPrice(2.9 / 1.02, 4));
-    assert.equal(gas.sell, roundPrice(2.9 * 1.02 ** 1.1, 4));
+    assert.equal(gas.buy, roundPrice(2.9 / 1.015, 4));
+    assert.equal(gas.sell, roundPrice(2.9 * 1.015 ** 1.1, 4));
     const spx = levelsFromAnchor(140, SPCX, SPCX.defaultFactor);
     assert.equal(spx.buy, roundPrice(140 / 1.01, 2));
     assert.equal(spx.sell, roundPrice(140 * 1.01 ** 1.1, 2));
@@ -843,7 +843,7 @@ describe("engine cycle", () => {
     assert.ok(prices.includes(expectedSell));
   });
 
-  it("NATGAS accumulate: seeds −1 from mark at 2%, TP reduce-only", () => {
+  it("NATGAS accumulate: seeds −1 from mark at 1.5%, TP reduce-only", () => {
     const s = createInitialState({ market: NATGAS, startingEquity: 2000 });
     setArmed(s, true);
     run(s, 2.85, 1_000);

@@ -101,6 +101,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     unackedPosDelta: 0,
     highestLvl: null,
     holdIds: [],
+    soldRungs: [],
   };
 }
 
@@ -354,6 +355,7 @@ function applyFill(state: EngineState, fill: Fill) {
   state.lastFillSide = fill.side;
   state.lastFillAt = fill.ts;
   if (isAccumulate(state)) ratchetHighest(state, fill.price, "fill");
+  if (fill.side === "sell") rememberSoldRung(state, fill.price);
   pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
     side: fill.side,
     price: fill.price,
@@ -415,6 +417,21 @@ function ingestLive(state: EngineState, live: LiveAccount) {
       ts: state.now,
     };
     state.fillsThisCycle.push(fill);
+    if (cand.side === "sell") rememberSoldRung(state, cand.price);
+  }
+  for (const o of vanished) {
+    if (filledIds.has(o.id)) continue;
+    if (!wouldHaveHit(o, state.mark, state.factor)) continue;
+    filledIds.add(o.id);
+    const fill: Fill = {
+      orderId: o.id,
+      side: o.side,
+      price: o.price,
+      qty: o.qty,
+      ts: state.now,
+    };
+    state.fillsThisCycle.push(fill);
+    if (o.side === "sell") rememberSoldRung(state, o.price);
   }
   if (state.fillsThisCycle.length) {
     const latest = state.fillsThisCycle.reduce((a, b) =>
@@ -528,6 +545,28 @@ function markProxPct(state: EngineState): number {
   return proximityPct(state.spacingPct, state.config.market);
 }
 
+function wouldHaveHit(order: GridOrder, mark: number, factor: number): boolean {
+  if (!(mark > 0) || !(order.price > 0)) return false;
+  if (order.side === "sell") {
+    if (mark + 1e-12 >= order.price) return true;
+    return stepsAway(order.price, mark, factor) < 0.25;
+  }
+  if (mark - 1e-12 <= order.price) return true;
+  return stepsAway(order.price, mark, factor) < 0.25;
+}
+
+function rememberSoldRung(state: EngineState, price: number) {
+  const px = roundPrice(price, state.config.market.priceDecimals);
+  state.soldRungs = [
+    ...state.soldRungs.filter((r) => state.now - r.at < 30 * 60_000 && !sameRung(r.price, px, state.factor)),
+    { price: px, at: state.now },
+  ].slice(-24);
+}
+
+function soldRungRecently(state: EngineState, price: number): boolean {
+  return state.soldRungs.some((r) => sameRung(r.price, price, state.factor) && state.now - r.at < 30 * 60_000);
+}
+
 function hasNear(state: EngineState, target: number, side?: Side): boolean {
   const prox = isAccumulate(state) ? accumulateProxPct(state) : 0;
   return state.orders.some((o) => {
@@ -612,6 +651,9 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
 
   if (state.lastFillPrice && sameRung(target, state.lastFillPrice, state.factor)) {
     return { reason: `just-filled level ${target.toFixed(5)}` };
+  }
+  if (side === "sell" && soldRungRecently(state, target)) {
+    return { reason: `already sold ${target.toFixed(5)} — next +1 only` };
   }
 
   if (!opts.allowExtra) {
@@ -832,12 +874,14 @@ function harvestRipSells(state: EngineState) {
     if (px <= state.mark) continue;
     if (!plusPnlSell(state, px)) continue;
     if (hasNear(state, px, "sell")) continue;
+    if (soldRungRecently(state, px)) continue;
     const usd = sellTicketUsd(state, px);
     let qty = baseQty(px, usd, m.sizeDecimals);
     qty = roundQty(Math.min(qty, remaining), m.sizeDecimals);
     if (qty <= 0) break;
     if (placeLimit(state, "sell", px, "impulse harvest +PnL", { qty, reduceOnly: true, allowImpulse: true, allowExtra: true })) {
       remaining -= qty;
+      break;
     }
   }
 }

@@ -401,6 +401,42 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
   });
 
+  it("NATGAS: vanished sell at mark is a fill even if pos lags — do not re-sell the same TP", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 10_000 });
+    const last = 2.9465;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = last;
+    s.position = { size: 80, entry: last };
+    const tp = levelsFromAnchor(last, NATGAS, NATGAS.defaultFactor).sell;
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: last,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 80, entry: last },
+        positionNotional: 236,
+        orders: [{ id: "tp", side: "sell", price: tp, qty: 4.4, notional: 13, placedAt: 1, mine: true }],
+      }),
+    });
+    step(s, {
+      now: 4_000,
+      mark: roundPrice(tp * 1.0002, NATGAS.priceDecimals),
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 80, entry: last },
+        positionNotional: 236,
+        orders: [],
+      }),
+    });
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - tp) < 1e-6);
+    const nextSell = levelsFromAnchor(tp, NATGAS, NATGAS.defaultFactor).sell;
+    const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
+    assert.ok(!sells.some((a) => Math.abs(a.price - tp) < 1e-6));
+    assert.ok(sells.every((a) => Math.abs(a.price - nextSell) < 1e-4 || a.price > tp));
+  });
+
   it("pending ghost does not log order-gone and expires so ±1 can re-place", () => {
     const s = createInitialState({ startingEquity: 5000 });
     const last = 0.7172;

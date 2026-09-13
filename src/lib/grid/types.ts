@@ -130,6 +130,8 @@ export type EngineState = {
   highestLvl: number | null;
   /** Live order ids of resting bunch limits (persist across ingest / restart). */
   holdIds: string[];
+  /** Sell rungs that filled (or vanished at/through mark). Do not re-place. */
+  soldRungs: Array<{ price: number; at: number }>;
 };
 
 export type StepInput = {

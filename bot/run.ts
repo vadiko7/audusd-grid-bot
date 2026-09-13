@@ -65,6 +65,12 @@ type SavedSettings = {
   markets?: Record<
     string,
     {
+      symbol?: string;
+      ticket?: number;
+      weight?: number;
+      band_low?: number;
+      band_high?: number;
+      highest_lvl?: number;
       orderNotional?: number;
       lastFillPrice?: number;
       lastFillSide?: string;
@@ -244,9 +250,9 @@ function loadSettings(): SavedSettings {
 }
 
 function saveSettings(book: {
-  market: { symbol: string };
+  market: MarketProfile;
   engine: {
-    config: { orderNotional: number };
+    config: { orderNotional: number; market: MarketProfile };
     lastFillPrice: number | null;
     lastFillSide: string | null;
     lastFillAt: number | null;
@@ -257,9 +263,17 @@ function saveSettings(book: {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   const prev = loadSettings();
   const markets = { ...(prev.markets ?? {}) };
+  const m = book.engine.config.market;
+  const ticket = book.engine.config.orderNotional;
   markets[book.market.symbol] = {
     ...(markets[book.market.symbol] ?? {}),
-    orderNotional: book.engine.config.orderNotional,
+    symbol: m.symbol,
+    ticket,
+    weight: m.weight,
+    band_low: m.bandLow,
+    band_high: m.bandHigh,
+    highest_lvl: book.engine.highestLvl ?? undefined,
+    orderNotional: ticket,
     lastFillPrice: book.engine.lastFillPrice ?? undefined,
     lastFillSide: book.engine.lastFillSide ?? undefined,
     lastFillAt: book.engine.lastFillAt ?? undefined,
@@ -305,9 +319,23 @@ type Book = {
   giveUp: Set<string>;
 };
 
+function overlayMarket(base: MarketProfile, savedM: SavedSettings["markets"] extends infer T ? T extends Record<string, infer V> ? V : never : never): MarketProfile {
+  const m = { ...base };
+  const w = Number(savedM?.weight);
+  if (Number.isFinite(w) && w > 0 && w < 1) m.weight = w;
+  const lo = Number(savedM?.band_low);
+  if (Number.isFinite(lo) && lo >= 0 && lo < 1) m.bandLow = lo;
+  const hi = Number(savedM?.band_high);
+  if (Number.isFinite(hi) && hi >= 0 && hi < 1) m.bandHigh = hi;
+  return m;
+}
+
 function makeBook(market: MarketProfile): Book {
+  const savedM = saved.markets?.[market.symbol];
+  market = overlayMarket(market, savedM);
   const savedN =
-    parseNotional(saved.markets?.[market.symbol]?.orderNotional) ??
+    parseNotional(savedM?.ticket) ??
+    parseNotional(savedM?.orderNotional) ??
     (market.symbol === "AUDUSD" ? parseNotional(saved.orderNotional) : null) ??
     parseNotional(process.env[`ORDER_NOTIONAL_${market.symbol}`]);
   const n = savedN && savedN !== 100 ? savedN : market.orderNotional;
@@ -324,7 +352,7 @@ function makeBook(market: MarketProfile): Book {
     const at = Number(saved.markets?.[market.symbol]?.lastFillAt);
     if (Number.isFinite(at) && at > 0) engine.lastFillAt = at;
   }
-  const hi = Number(saved.markets?.[market.symbol]?.highestLvl);
+  const hi = Number(savedM?.highest_lvl ?? savedM?.highestLvl);
   if (Number.isFinite(hi) && hi > 0) engine.highestLvl = hi;
   const holds = saved.markets?.[market.symbol]?.holdOrderIds;
   if (Array.isArray(holds)) engine.holdIds = holds.filter((id) => typeof id === "string" && id.length > 0);
@@ -596,7 +624,12 @@ function card(s){
   const orders=(s.orders||[]).map(o=>"<li>"+o.side.toUpperCase()+" "+Number(o.price).toFixed(d)+" × "+Number(o.qty).toFixed(q)+"</li>").join("")||"<li>none</li>";
   const logs=[...(s.logs||[])].slice(-24).reverse().map(l=>"<li><code>"+new Date(l.ts).toISOString().slice(11,19)+"</code> "+esc(l.level)+" "+esc(l.message)+"</li>").join("")||"<li>empty</li>";
   const cap = s.strategy==="accumulate"
-    ? " · hi <code>"+(s.highestLvl==null?"n/a":Number(s.highestLvl).toFixed(d))+"</code> · buy <code>$"+Number(s.buyUsed).toFixed(0)+"/"+Number(s.buyCap).toFixed(0)+"</code>"
+    ? " · w <code>"+(100*Number(s.posWeight||0)).toFixed(1)+"%</code>"
+      +" · band <code>"+(100*Number(s.bandLow||0)).toFixed(0)+"–"+(100*Number(s.bandHigh||0)).toFixed(0)+"%</code>"
+      +(s.underweight?" <span class='warn'>under</span>":"")
+      +" · sleeve <code>$"+Number(s.sleeve||0).toFixed(0)+"</code>"
+      +" · hi <code>"+(s.highestLvl==null?"n/a":Number(s.highestLvl).toFixed(d))+"</code>"
+      +" · buy <code>$"+Number(s.buyUsed).toFixed(0)+"/"+Number(s.buyCap).toFixed(0)+"</code>"
     : "";
   return '<div class="card" data-sym="'+esc(s.symbol)+'">'
     +"<h2>"+esc(s.symbol)+" "+esc(s.prefer)+" <code>m"+s.marketId+"</code></h2>"

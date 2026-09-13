@@ -1,9 +1,9 @@
 # audusd-grid-bot
 
-NATGAS long geometric grid, plus **SPCX**, **TSLA**, **ETH**, **GEV**, **XAU**, and **BTC** long accumulate (3× equity buy cap, harvest rips). Headless on the Oracle VM.
+NATGAS + **SPCX**, **TSLA**, **ETH**, **GEV**, **XAU**, and **BTC** long accumulate. Headless on the Oracle VM.
 Keys live in `.env` on disk — fill once, systemd reads them after reboot.
 
-`MARKETS=NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default; AUDUSD off). Entry is 1 step; TP is 1.1 steps and **reduce-only limit**. Proximity is **1.25 × spacing** on every book (NATGAS 2.50%, SPCX 1.25%, TSLA 0.94%, ETH/GEV 1.00%, XAU 0.625%, BTC 0.75%). NATGAS 2.00% / 2.20% · 10x. SPCX 1.00% / 1.10%. TSLA 0.75% / 0.825%. ETH 0.80% / 0.88% · 50x. GEV 0.80% / 0.88% · 10x. XAU 0.50% / 0.55% · 25x. BTC 0.60% / 0.66% · 50x. Accumulate books: $25 tickets, no shorts, harvest 25% of $/lvl floored at $13. Impulse-cool catch-up is a **limit at mid** (never a market). After it is placed, mid becomes lastFill and ±1 continues around it. Cap 8 levels from mid; leave 8 levels of position/capacity (no flip) — if not enough, skip bunch and continue as is. Only the pre-impulse ±1 is cancelled; every other leftover limit is held until fill and ignored when later ±1 fill.
+`MARKETS=NATGAS,SPCX,TSLA,ETH,GEV,XAU,BTC` (default; AUDUSD off). Sleeves from **90% of Lighter full equity** (off-exchange cash ignored). Buy cap is **sleeve × 3** only — no cash-floor halt. Weights / bands: SPCX 19.8% (18–28), GEV 18% (16–24), XAU 16.2% (14–23), TSLA 11.7% (10–17), BTC 9.9% (8–15), NATGAS 8.1% (6–12), ETH 6.3% (5–10). Underweight (`w ≤ band_low`): `highest_lvl := mark`, every reduce-only sell is 25%. In/above band: ATH ratchets up only; sell ≥ ATH 25%, below 90%. `band_high` is informational. Entry 1 step; TP 1.1 steps reduce-only. Proximity **1.25 × spacing**. NATGAS 2.00%. Ticket $25, harvest floor $13. Impulse-cool catch-up is a **limit at mid**. Cap 8 levels from mid; leave 8 levels (no flip).
 
 ## First setup (VM)
 

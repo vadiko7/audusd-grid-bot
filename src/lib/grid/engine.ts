@@ -7,7 +7,7 @@ import {
   VELOCITY_SPIKE_PCT,
   VELOCITY_SPIKE_WINDOW_MS,
 } from "./constants.ts";
-import { AUDUSD } from "./markets.ts";
+import { AUDUSD, SLEEVE_EQUITY_FRAC } from "./markets.ts";
 import { resolveImpulse, velocityPct } from "./impulse.ts";
 import {
   adverseAgainstLong,
@@ -142,9 +142,27 @@ export function isAccumulate(state: EngineState): boolean {
   return state.config.market.strategy === "accumulate";
 }
 
+export function sleeveUsd(state: EngineState): number {
+  const w = state.config.market.weight;
+  if (w == null) return equity(state);
+  return Math.max(0, equity(state) * SLEEVE_EQUITY_FRAC * w);
+}
+
+export function positionWeight(state: EngineState, mark = state.mark): number {
+  const eq = equity(state, mark);
+  if (!(eq > 0)) return 0;
+  return positionNotional(state, mark) / eq;
+}
+
+export function isUnderweight(state: EngineState): boolean {
+  const low = state.config.market.bandLow;
+  if (low == null) return false;
+  return positionWeight(state) <= low + 1e-12;
+}
+
 export function buyCapUsd(state: EngineState): number {
   const mult = state.config.market.buyCapEquityMult ?? 3;
-  return Math.max(0, equity(state) * mult);
+  return Math.max(0, sleeveUsd(state) * mult);
 }
 
 export function pendingBuyNotional(state: EngineState): number {
@@ -169,6 +187,7 @@ function accumulateProxPct(state: EngineState): number {
 function ratchetHighest(state: EngineState, price: number, why: string) {
   if (!(price > 0)) return;
   const px = roundPrice(price, state.config.market.priceDecimals);
+  if (isUnderweight(state)) return;
   if (state.highestLvl != null && px <= state.highestLvl + 1e-12) return;
   const prev = state.highestLvl;
   state.highestLvl = px;
@@ -179,12 +198,27 @@ function ratchetHighest(state: EngineState, price: number, why: string) {
   );
 }
 
+/** Underweight: harvest line := mark so every reduce-only sell is 25%. ATH key stays in JSON. */
+function applyUnderweightMark(state: EngineState) {
+  if (!isAccumulate(state) || !isUnderweight(state) || !(state.mark > 0)) return;
+  const px = roundPrice(state.mark, state.config.market.priceDecimals);
+  if (state.highestLvl != null && Math.abs(state.highestLvl - px) <= 1e-12) return;
+  const prev = state.highestLvl;
+  state.highestLvl = px;
+  pushLog(
+    state,
+    "info",
+    `highest_lvl := mark ${px.toFixed(state.config.market.priceDecimals)} (underweight w=${(positionWeight(state) * 100).toFixed(1)}% ≤ ${(state.config.market.bandLow ?? 0) * 100}%${prev == null ? "" : `; was ${prev.toFixed(state.config.market.priceDecimals)}`})`,
+  );
+}
+
 function sellTicketUsd(state: EngineState, price: number): number {
   const m = state.config.market;
   const ticket = state.config.orderNotional;
+  const harvest = m.harvestSellFrac ?? 0.25;
+  const reload = m.reloadSellFrac ?? 0.9;
   const hi = state.highestLvl;
-  const frac =
-    hi != null && price + 1e-12 >= hi ? (m.harvestSellFrac ?? 0.25) : (m.reloadSellFrac ?? 0.9);
+  const frac = isUnderweight(state) || (hi != null && price + 1e-12 >= hi) ? harvest : reload;
   const floor = m.minQuoteNotional ?? 13;
   return Math.max(ticket * frac, floor);
 }
@@ -536,14 +570,14 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
     if (state.position.size < -1e-9) return { reason: "no shorts — will not buy into a short" };
     if (!underBuyCap(state, ticket)) {
       return {
-        reason: `buy cap ${buyUsedUsd(state).toFixed(0)} ≥ ${buyCapUsd(state).toFixed(0)} (equity×${state.config.market.buyCapEquityMult ?? 3})`,
+        reason: `buy cap ${buyUsedUsd(state).toFixed(0)} ≥ ${buyCapUsd(state).toFixed(0)} (sleeve×${state.config.market.buyCapEquityMult ?? 3})`,
         extra: { buyUsed: buyUsedUsd(state), buyCap: buyCapUsd(state) },
       };
     }
   }
 
   const remaining = remainingCapacity(state);
-  if (side === "buy" && remaining < ticket) {
+  if (!acc && side === "buy" && remaining < ticket) {
     return {
       reason: `remaining ${remaining.toFixed(0)} < ${ticket}`,
       extra: { remaining },
@@ -767,8 +801,7 @@ function accumulateTargets(state: EngineState): { side: Side; price: number }[] 
   const levels = validLevels(state);
   const m = state.config.market;
   const out: { side: Side; price: number }[] = [];
-  const buysOk = state.impulse === "none" && underBuyCap(state);
-  if (buysOk) out.push({ side: "buy", price: levels.buy });
+  if (state.impulse !== "buy") out.push({ side: "buy", price: levels.buy });
   if (!isFlat(state) && state.position.size > 0) {
     out.push({ side: "sell", price: levels.sell });
     if (state.impulse === "buy") {
@@ -904,7 +937,7 @@ export function maintainPair(state: EngineState, why: string) {
       pushLog(
         state,
         "info",
-        `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} hi ${state.highestLvl?.toFixed(m.priceDecimals) ?? "n/a"} cap ${buyUsedUsd(state).toFixed(0)}/${buyCapUsd(state).toFixed(0)}`,
+        `±1 ${why} buy ${levels.buy.toFixed(m.priceDecimals)} sell ${levels.sell.toFixed(m.priceDecimals)} lastFill ${fillAnchor(state)?.toFixed(m.priceDecimals)} hi ${state.highestLvl?.toFixed(m.priceDecimals) ?? "n/a"} cap ${buyUsedUsd(state).toFixed(0)}/${buyCapUsd(state).toFixed(0)} w ${(positionWeight(state) * 100).toFixed(1)}%${isUnderweight(state) ? " under" : ""}`,
       );
     }
     if (needSell) placeLimit(state, "sell", levels.sell, why, { reduceOnly: true });
@@ -1261,6 +1294,7 @@ function impulseCoolCatch(state: EngineState): void {
 }
 
 function runArmedCycle(state: EngineState) {
+  applyUnderweightMark(state);
   const currentBias = bias(state);
   const anchor = fillAnchor(state);
   const steps = state.config.market.adverseSteps;
@@ -1377,6 +1411,12 @@ export function snapshotPublic(state: EngineState) {
     holdOrderIds: state.holdIds,
     buyCap: isAccumulate(state) ? buyCapUsd(state) : remaining,
     buyUsed: isAccumulate(state) ? buyUsedUsd(state) : posN,
+    sleeve: isAccumulate(state) ? sleeveUsd(state) : 0,
+    weight: m.weight ?? 0,
+    bandLow: m.bandLow ?? 0,
+    bandHigh: m.bandHigh ?? 0,
+    posWeight: positionWeight(state),
+    underweight: isUnderweight(state),
     levels,
     bias: bias(state),
     flat: isFlat(state),

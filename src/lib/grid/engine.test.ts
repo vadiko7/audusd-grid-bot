@@ -12,6 +12,9 @@ import {
   step,
   buyCapUsd,
   buyUsedUsd,
+  sleeveUsd,
+  isUnderweight,
+  positionWeight,
 } from "./engine.ts";
 import { baseQty, downLevel, factorFromSpacing, levelsFromAnchor, roundPrice, upLevel } from "./math.ts";
 import { classifyRegime, spacingFromAtr } from "./atr.ts";
@@ -785,7 +788,7 @@ describe("engine cycle", () => {
       now: 2_000,
       mark: 2.899,
       live: liveAccount({
-        equity: 500,
+        equity: 10_000,
         position: { size: 210.24, entry: 2.85 },
         positionNotional: 608,
         orders: [{ id: "onfill", side: "sell", price: fill, qty: 8.62, notional: 25, placedAt: 1, mine: true }],
@@ -840,22 +843,14 @@ describe("engine cycle", () => {
     assert.ok(prices.includes(expectedSell));
   });
 
-  it("NATGAS long: no seed from mark; after buy fill places ±1 at 2%", () => {
+  it("NATGAS accumulate: seeds −1 from mark at 2%, TP reduce-only", () => {
     const s = createInitialState({ market: NATGAS, startingEquity: 2000 });
     setArmed(s, true);
     run(s, 2.85, 1_000);
-    assert.equal(s.orders.length, 0);
-    const seedPx = downLevel(2.85, NATGAS.defaultFactor, NATGAS.priceDecimals);
-    s.orders = [{ id: "seed", side: "buy", price: seedPx, qty: 35, notional: 100, placedAt: 1_000 }];
-    run(s, seedPx, 2_000);
-    assert.equal(s.fillsThisCycle.length, 1);
-    assert.ok(s.position.size > 0);
-    const prices = s.orders.map((o) => o.price);
-    assert.ok(prices.includes(levelsFromAnchor(seedPx, NATGAS, NATGAS.defaultFactor).sell));
-    assert.ok(prices.includes(downLevel(seedPx, NATGAS.defaultFactor, NATGAS.priceDecimals)));
-    const tp = s.actions.find((a) => a.type === "place" && a.side === "sell");
-    assert.ok(tp && tp.type === "place");
-    assert.equal(tp.reduceOnly, true);
+    assert.ok(s.lastFillPrice && Math.abs(s.lastFillPrice - 2.85) < 1e-6);
+    const buy = downLevel(2.85, NATGAS.defaultFactor, NATGAS.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"));
   });
 
   it("freezes all new limits during impulse so a walk cannot staircase", () => {
@@ -1123,7 +1118,7 @@ describe("SPCX accumulate", () => {
     s.highestLvl = 140;
     s.lastFillPrice = 140;
     s.lastFillAt = 1;
-    s.position = { size: 2, entry: 139 };
+    s.position = { size: 4, entry: 139 };
     const sellPx = levelsFromAnchor(140, SPCX, SPCX.defaultFactor).sell;
     setArmed(s, true);
     step(s, {
@@ -1131,8 +1126,8 @@ describe("SPCX accumulate", () => {
       mark: 140.2,
       live: liveAccount({
         equity: 2000,
-        position: { size: 2, entry: 139 },
-        positionNotional: 280,
+        position: { size: 4, entry: 139 },
+        positionNotional: 560,
         orders: [{ id: "s", side: "sell", price: sellPx, qty: 0.07, notional: 10, placedAt: 1, mine: true }],
       }),
     });
@@ -1141,8 +1136,8 @@ describe("SPCX accumulate", () => {
       mark: 141.5,
       live: liveAccount({
         equity: 2000,
-        position: { size: 1.93, entry: 139 },
-        positionNotional: 273,
+        position: { size: 3.93, entry: 139 },
+        positionNotional: 556,
         orders: [],
       }),
     });
@@ -1153,8 +1148,8 @@ describe("SPCX accumulate", () => {
       mark: 138,
       live: liveAccount({
         equity: 2000,
-        position: { size: 1.93, entry: 139 },
-        positionNotional: 266,
+        position: { size: 3.93, entry: 139 },
+        positionNotional: 542,
         orders: [],
       }),
     });
@@ -1457,5 +1452,101 @@ describe("SPCX accumulate", () => {
     const sell = s.actions.find((a) => a.type === "place" && a.side === "sell");
     assert.ok(sell);
     assert.equal(sell.price, lv.sell);
+  });
+});
+
+describe("portfolio sleeves", () => {
+  it("weights sum to 90% of full equity; cap is sleeve × 3", () => {
+    const sum = Object.values(MARKETS)
+      .filter((m) => m.weight)
+      .reduce((a, m) => a + (m.weight ?? 0), 0);
+    assert.ok(Math.abs(sum - 0.9) < 1e-9);
+    assert.equal(SPCX.weight, 0.198);
+    assert.equal(SPCX.bandLow, 0.18);
+    assert.equal(SPCX.bandHigh, 0.28);
+    const s = createInitialState({ market: SPCX, startingEquity: 10_000 });
+    s.accountSource = "sim";
+    s.accountEquity = 10_000;
+    s.mark = 150;
+    assert.equal(Math.round(sleeveUsd(s)), 1782);
+    assert.equal(Math.round(buyCapUsd(s)), 5346);
+  });
+
+  it("underweight snaps highest_lvl to mark and sells 25%", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 10_000 });
+    s.lastFillPrice = 150;
+    s.lastFillAt = 1;
+    s.highestLvl = 160;
+    s.position = { size: 10, entry: 148 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 149,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 10, entry: 148 },
+        positionNotional: 1490,
+        orders: [],
+      }),
+    });
+    assert.ok(isUnderweight(s));
+    assert.ok(positionWeight(s) <= 0.18);
+    assert.equal(s.highestLvl, 149);
+    const sell = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sell);
+    const usd = sell.qty * sell.price;
+    assert.ok(usd >= 13 - 0.5);
+    assert.ok(usd < 16);
+  });
+
+  it("in-band sell below ATH is 90%; band_high does not block buys", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 10_000 });
+    s.lastFillPrice = 148;
+    s.lastFillAt = 1;
+    s.highestLvl = 160;
+    s.position = { size: 20, entry: 145 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 148.2,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 20, entry: 145 },
+        positionNotional: 2964,
+        orders: [],
+      }),
+    });
+    assert.ok(!isUnderweight(s));
+    assert.ok(positionWeight(s) > 0.28);
+    assert.equal(s.highestLvl, 160);
+    const sell = s.actions.find((a) => a.type === "place" && a.side === "sell");
+    assert.ok(sell);
+    const expectUsd = 25 * 0.9;
+    assert.ok(Math.abs(sell.qty * sell.price - expectUsd) / expectUsd < 0.35);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy"));
+  });
+
+  it("does not halt buys on remaining cash when sleeve cap has room", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 10_000 });
+    s.lastFillPrice = 150;
+    s.lastFillAt = 1;
+    s.highestLvl = 150;
+    s.position = { size: 2, entry: 149 };
+    setArmed(s, true);
+    step(s, {
+      now: 2_000,
+      mark: 150,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 2, entry: 149 },
+        positionNotional: 300,
+        foreignMargin: 9_990,
+        orders: [],
+      }),
+    });
+    assert.ok(remainingCapacity(s) < 25);
+    assert.ok(buyUsedUsd(s) < buyCapUsd(s));
+    const buy = downLevel(150, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 1e-6));
   });
 });

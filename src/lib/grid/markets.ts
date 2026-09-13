@@ -45,7 +45,16 @@ export type MarketProfile = {
   reloadSellFrac?: number;
   minQuoteNotional?: number;
   minBaseAmount?: number;
+  /** Target sleeve as a fraction of Lighter full equity (weights sum to 0.90). */
+  weight?: number;
+  /** w_i = position_notional / full_equity. Underweight when ≤ bandLow. */
+  bandLow?: number;
+  /** Informational. Does not block buys or change sell size. */
+  bandHigh?: number;
 };
+
+/** Sleeve pool is 90% of Lighter full equity. Off-exchange cash is ignored. */
+export const SLEEVE_EQUITY_FRAC = 0.9;
 
 /** AUDUSD Short Geometric Grid */
 export const AUDUSD: MarketProfile = {
@@ -81,12 +90,12 @@ export const AUDUSD: MarketProfile = {
   elevatedCycleMs: 300,
 };
 
-/** NATGAS Long Geometric Grid */
+/** NATGAS Long Geometric Grid — sleeve 8.1%, band 6–12% */
 export const NATGAS: MarketProfile = {
   symbol: "NATGAS",
   marketId: 158,
   prefer: "long",
-  strategy: "classic",
+  strategy: "accumulate",
   maxLeverage: 10,
   orderNotional: 25,
   priceDecimals: 4,
@@ -110,9 +119,17 @@ export const NATGAS: MarketProfile = {
   proximityMult: 1.25,
   proximityMinPct: 2.5,
   proximityMaxPct: 2.5,
-  adverseSteps: 1.75,
+  adverseSteps: 8,
   baseCycleMs: 2_000,
   elevatedCycleMs: 300,
+  buyCapEquityMult: 3,
+  harvestSellFrac: 0.25,
+  reloadSellFrac: 0.9,
+  minQuoteNotional: 13,
+  minBaseAmount: 0.01,
+  weight: 0.081,
+  bandLow: 0.06,
+  bandHigh: 0.12,
 };
 
 /** SPCX long accumulate — cap buys at 3× equity, harvest rips, no shorts */
@@ -152,6 +169,9 @@ export const SPCX: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.065,
+  weight: 0.198,
+  bandLow: 0.18,
+  bandHigh: 0.28,
 };
 export const TSLA: MarketProfile = {
   symbol: "TSLA",
@@ -189,6 +209,9 @@ export const TSLA: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.02,
+  weight: 0.117,
+  bandLow: 0.1,
+  bandHigh: 0.17,
 };
 
 /** ETH long accumulate — $25, 0.80% entry, 50x, cap 3× equity */
@@ -228,6 +251,9 @@ export const ETH: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.005,
+  weight: 0.063,
+  bandLow: 0.05,
+  bandHigh: 0.1,
 };
 
 /** GEV long accumulate — $25, 0.80% entry, 10x, cap 3× equity */
@@ -267,6 +293,9 @@ export const GEV: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.005,
+  weight: 0.18,
+  bandLow: 0.16,
+  bandHigh: 0.24,
 };
 
 /** XAU long accumulate — $25, 0.50% entry, 25x, cap 3× equity */
@@ -306,6 +335,9 @@ export const XAU: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.002,
+  weight: 0.162,
+  bandLow: 0.14,
+  bandHigh: 0.23,
 };
 
 /** BTC long accumulate — $25, 0.60% entry, 50x, cap 3× equity */
@@ -345,6 +377,9 @@ export const BTC: MarketProfile = {
   reloadSellFrac: 0.9,
   minQuoteNotional: 13,
   minBaseAmount: 0.0001,
+  weight: 0.099,
+  bandLow: 0.08,
+  bandHigh: 0.15,
 };
 
 export const MARKETS: Record<string, MarketProfile> = {

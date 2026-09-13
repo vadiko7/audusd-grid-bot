@@ -16,7 +16,7 @@ import {
 import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
 import { sameRung, baseQty } from "../src/lib/grid/math.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
-import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, signCreateMarket, type LighterCreds } from "./signer.ts";
+import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, type LighterCreds } from "./signer.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -471,18 +471,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
     if (action.type !== "place") continue;
     try {
       const clientOrderIndex = clientSeq++;
-      const exec = action.exec === "market" ? "market" : "limit";
-      const signed =
-        exec === "market"
-          ? await signCreateMarket(creds, {
-              marketIndex: m.marketId,
-              clientOrderIndex,
-              baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
-              avgExecutionPrice: Math.round(action.price * 10 ** m.priceDecimals),
-              isAsk: action.side === "sell",
-              reduceOnly: action.reduceOnly,
-            })
-          : await signCreateLimit(creds, {
+      const signed = await signCreateLimit(creds, {
               marketIndex: m.marketId,
               clientOrderIndex,
               baseAmount: Math.round(action.qty * 10 ** m.sizeDecimals),
@@ -496,7 +485,7 @@ async function executeActions(book: Book, actions: EngineAction[]) {
         book.owned.clients.push({ n: clientOrderIndex, at: nowMs() });
       }
       saveOwned();
-      log(`${m.symbol} tx ${exec} ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
+      log(`${m.symbol} tx limit ${action.side} ${action.price.toFixed(m.priceDecimals)} × ${action.qty} ${res.hash ?? ""}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;

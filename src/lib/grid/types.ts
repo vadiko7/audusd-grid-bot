@@ -72,7 +72,7 @@ export type LiveAccount = {
 };
 
 export type EngineAction =
-  | { type: "place"; side: Side; price: number; qty: number; why: string; reduceOnly?: boolean; exec?: "limit" | "market" }
+  | { type: "place"; side: Side; price: number; qty: number; why: string; reduceOnly?: boolean; exec?: "limit" }
   | { type: "cancel"; orderId: string; side: Side; price: number; why: string }
   | { type: "cancel_all"; why: string };
 

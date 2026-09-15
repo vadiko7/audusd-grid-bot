@@ -821,8 +821,14 @@ function isMineOrder(order: GridOrder): boolean {
   return order.mine !== false;
 }
 
+function cancelBotLeftovers(state: EngineState, reason: string) {
+  cancelAll(state, reason);
+  state.orders = state.orders.filter((o) => !isMineOrder(o));
+  state.holdIds = [];
+}
+
 function cancelAll(state: EngineState, reason: string) {
-  const force = /disarm|flatten|impulse cool/i.test(reason);
+  const force = /disarm|flatten|impulse/i.test(reason);
   const mine = state.orders.filter((o) => isMineOrder(o) && (force || !isHoldOrder(o)));
   if (mine.length === 0) {
     state.lastCleanReason = reason;
@@ -836,7 +842,7 @@ function cancelAll(state: EngineState, reason: string) {
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {
   if (!isMineOrder(order)) return;
-  if (isHoldOrder(order) && !/disarm|flatten|impulse cool/i.test(why)) {
+  if (isHoldOrder(order) && !/disarm|flatten|impulse/i.test(why)) {
     pushLog(state, "info", `hold ${order.side.toUpperCase()} ${order.price.toFixed(state.config.market.priceDecimals)} — leave until fill (${why})`);
     return;
   }
@@ -882,25 +888,27 @@ function accumulateTargets(state: EngineState): { side: Side; price: number }[] 
 function harvestRipSells(state: EngineState) {
   if (!isAccumulate(state) || state.impulse !== "buy") return;
   if (isFlat(state) || state.position.size <= 0) return;
+  const mineSells = state.orders.filter((x) => isMineOrder(x) && x.side === "sell");
+  if (mineSells.length >= 1) return;
   const m = state.config.market;
   const levels = validLevels(state);
   let px = levels.sell;
-  let remaining = Math.abs(state.position.size);
-  for (const o of state.orders.filter((x) => isMineOrder(x) && x.side === "sell")) remaining -= o.qty;
   const tpF = tpFactorOf(m, state.factor);
-  for (let i = 0; i < 6 && remaining > 1e-6; i++) {
+  const ticket = state.config.orderNotional;
+  const harvest = m.harvestSellFrac ?? 0.25;
+  const floor = m.minQuoteNotional ?? 13;
+  const usd = Math.max(ticket * harvest, floor);
+  for (let i = 0; i < 6; i++) {
     if (i > 0) px = upLevel(px, tpF, m.priceDecimals);
     if (px <= state.mark) continue;
     if (!plusPnlSell(state, px)) continue;
     if (hasNear(state, px, "sell")) continue;
     if (soldRungRecently(state, px)) continue;
-    const usd = sellTicketUsd(state, px);
     let qty = baseQty(px, usd, m.sizeDecimals);
-    qty = roundQty(Math.min(qty, remaining), m.sizeDecimals);
+    qty = roundQty(Math.min(qty, Math.abs(state.position.size)), m.sizeDecimals);
     if (qty <= 0) break;
     if (placeLimit(state, "sell", px, "impulse harvest +PnL", { qty, reduceOnly: true, allowImpulse: true, allowExtra: true })) {
-      remaining -= qty;
-      break;
+      return;
     }
   }
 }
@@ -994,6 +1002,7 @@ export function maintainPair(state: EngineState, why: string) {
       harvestRipSells(state);
       return;
     }
+    if (state.impulse !== "none") return;
     const needSell = !isFlat(state) && state.position.size > 0 && !hasNear(state, levels.sell, "sell");
     const needBuy = underBuyCap(state) && state.impulse === "none" && !hasNear(state, levels.buy, "buy");
     if (why.startsWith("arm") || needSell || needBuy) {
@@ -1096,24 +1105,27 @@ function updateImpulse(state: EngineState, input: StepInput) {
       } else {
         pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
       }
-    } else if (isAccumulate(state) && resolved.impulse === "buy") {
-      pushLog(
-        state,
-        "impulse",
-        `impulse BUY harvest ≥25% reduce-only above — no new buys (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-      );
-    } else if (isAccumulate(state) && resolved.impulse === "sell") {
-      pushLog(
-        state,
-        "impulse",
-        `impulse SELL — no new buys until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-      );
     } else {
-      pushLog(
-        state,
-        "impulse",
-        `impulse ${resolved.impulse.toUpperCase()} — freeze new limits until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-      );
+      if (state.config.armed) cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
+      if (isAccumulate(state) && resolved.impulse === "buy") {
+        pushLog(
+          state,
+          "impulse",
+          `impulse BUY — leftovers cleared, one reduce-only harvest, no new buys (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        );
+      } else if (isAccumulate(state) && resolved.impulse === "sell") {
+        pushLog(
+          state,
+          "impulse",
+          `impulse SELL — leftovers cleared, freeze ±1 until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        );
+      } else {
+        pushLog(
+          state,
+          "impulse",
+          `impulse ${resolved.impulse.toUpperCase()} — leftovers cleared, freeze until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        );
+      }
     }
   }
   state.impulse = resolved.impulse;
@@ -1214,9 +1226,7 @@ function impulseCoolCatch(state: EngineState): void {
   const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
   const prox = acc ? accumulateProxPct(state) : proximityPct(state.spacingPct, m);
   const far = distPct > prox;
-  cancelAll(state, "impulse cool leftovers");
-  state.orders = state.orders.filter((o) => !isMineOrder(o));
-  state.holdIds = [];
+  cancelBotLeftovers(state, "impulse cool leftovers");
   if (!far) {
     pushLog(
       state,

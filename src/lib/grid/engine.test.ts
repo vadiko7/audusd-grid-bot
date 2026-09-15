@@ -941,7 +941,7 @@ describe("engine cycle", () => {
     s.actions = [];
     run(s, 0.7 * 1.0035, t0 + 16_000 + 50_000);
     assert.equal(s.impulse, "buy");
-    assert.ok(s.logs.some((l) => l.level === "impulse" && l.message.includes("freeze new limits")));
+    assert.ok(s.logs.some((l) => l.level === "impulse" && l.message.includes("freeze")));
     assert.equal(s.orders.length, 0);
   });
 
@@ -1034,6 +1034,9 @@ describe("engine cycle", () => {
     setArmed(s, true);
     run(s, 0.73, t0 + 50_000);
     assert.equal(s.impulse, "buy");
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "pair-buy"));
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "manual-buy"));
     let catchActions = s.actions.slice();
     for (let i = 1; i <= 35; i++) {
       run(s, 0.73, t0 + 50_000 + i * 2_000);
@@ -1047,8 +1050,6 @@ describe("engine cycle", () => {
       catchActions.find((a) => a.type === "place" && a.exec === "market"),
       undefined,
     );
-    assert.ok(catchActions.some((a) => a.type === "cancel" && a.orderId === "pair-buy"));
-    assert.ok(catchActions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
     assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "manual-buy"));
     assert.ok(!s.orders.some((o) => o.id === "old-extra" || o.id === "pair-buy"));
     assert.ok(s.orders.some((o) => o.id === "manual-buy"));
@@ -1267,6 +1268,58 @@ describe("SPCX accumulate", () => {
     const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
     assert.ok(sells.length >= 1);
     assert.ok(sells.every((a) => a.reduceOnly));
+    const live = liveAccount({
+      equity: 2000,
+      position: { size: 4, entry: 138 },
+      positionNotional: 560,
+      orders: s.orders.filter((o) => !o.id.startsWith("pending:")),
+    });
+    for (let i = 1; i <= 8; i++) {
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: 140.2 + i * 0.05, live });
+    }
+    assert.equal(s.impulse, "buy");
+    assert.equal(s.orders.filter((o) => o.side === "sell" && o.mine !== false).length, 1, "harvest must not stack a new sell every cycle");
+  });
+
+  it("buy→sell impulse flip cancels harvest leftovers and does not add ±1", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    const t0 = 10_000;
+    s.markHistory = [
+      { t: t0, p: 137.5 },
+      { t: t0 + 50_000, p: 140.2 },
+    ];
+    setArmed(s, true);
+    step(s, {
+      now: t0 + 50_000,
+      mark: 140.2,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 560,
+        orders: [],
+      }),
+    });
+    assert.equal(s.impulse, "buy");
+    const harvestId = s.orders.find((o) => o.side === "sell")?.id;
+    assert.ok(harvestId);
+    step(s, {
+      now: t0 + 100_000,
+      mark: 136,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 544,
+        orders: s.orders.filter((o) => o.id === harvestId).map((o) => ({ ...o, id: harvestId })),
+      }),
+    });
+    assert.equal(s.impulse, "sell");
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === harvestId));
+    assert.ok(!s.orders.some((o) => o.id === harvestId));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
   });
 
   it("dump cool uses the same leftovers → bunch → ±1 path", () => {

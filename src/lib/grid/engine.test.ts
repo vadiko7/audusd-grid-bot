@@ -994,7 +994,7 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel_all" && String(a.why).includes("spacing")));
   });
 
-  it("impulse cool far places mid LIMIT as lastFill, cancels only pre-impulse ±1, keeps other leftovers", () => {
+  it("impulse cool far clears bot leftovers then mid LIMIT then ±1", () => {
     const s = createInitialState({ startingEquity: 8000 });
     const t0 = 100_000;
     for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
@@ -1021,6 +1021,15 @@ describe("engine cycle", () => {
         placedAt: t0,
         mine: true,
       },
+      {
+        id: "manual-buy",
+        side: "buy",
+        price: 0.66,
+        qty: 10,
+        notional: 7,
+        placedAt: t0,
+        mine: false,
+      },
     ];
     setArmed(s, true);
     run(s, 0.73, t0 + 50_000);
@@ -1039,8 +1048,10 @@ describe("engine cycle", () => {
       undefined,
     );
     assert.ok(catchActions.some((a) => a.type === "cancel" && a.orderId === "pair-buy"));
-    assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
-    assert.ok(s.orders.some((o) => o.id === "old-extra" && o.holdUntilFill));
+    assert.ok(catchActions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
+    assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "manual-buy"));
+    assert.ok(!s.orders.some((o) => o.id === "old-extra" || o.id === "pair-buy"));
+    assert.ok(s.orders.some((o) => o.id === "manual-buy"));
     const one = baseQty(0.73);
     const lim = catchActions.find((a) => a.type === "place" && Math.abs(a.price - 0.73) < 1e-8);
     assert.ok(lim && lim.type === "place");
@@ -1057,8 +1068,7 @@ describe("engine cycle", () => {
     const holdId = s.orders.find((o) => o.holdUntilFill && Math.abs(o.price - 0.73) < 1e-8)?.id;
     run(s, around.buy, t0 + 200_000);
     assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill), "bunch still resting after ±1 fill");
-    assert.ok(s.orders.some((o) => o.id === "old-extra" && o.holdUntilFill));
-    assert.ok(!s.actions.some((a) => a.type === "cancel" && (a.orderId === holdId || a.orderId === "old-extra")));
+    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === holdId));
   });
 
   it("impulse cool reducing bunch skipped when it cannot leave 8 levels", () => {
@@ -1313,30 +1323,47 @@ describe("SPCX accumulate", () => {
       { t: t0 + 50_000, p: 145 },
     ];
     setArmed(s, true);
-    const live = liveAccount({
-      equity: 10_000,
-      position: { size: 5, entry: 138 },
-      positionNotional: 725,
-      orders: [leftover],
+    step(s, {
+      now: t0 + 50_000,
+      mark: 145,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 5, entry: 138 },
+        positionNotional: 725,
+        orders: [leftover],
+      }),
     });
-    step(s, { now: t0 + 50_000, mark: 145, live });
     assert.equal(s.impulse, "buy");
+    let cooled = false;
     for (let i = 1; i <= 40; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: 145.05, live });
-      if (s.impulse === "none") break;
+      step(s, {
+        now: t0 + 50_000 + i * 2_000,
+        mark: 145.05,
+        live: liveAccount({
+          equity: 10_000,
+          position: { size: 5, entry: 138 },
+          positionNotional: 725,
+          orders: cooled ? [] : [leftover],
+        }),
+      });
+      if (s.impulse === "none") {
+        cooled = true;
+        break;
+      }
     }
     assert.equal(s.impulse, "none");
     const mid = 145.05;
+    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "leftover-sell"));
+    assert.ok(!s.orders.some((o) => o.id === "leftover-sell"));
     assert.ok(
       s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - mid) < 0.05),
-      "bunch at mid despite leftover 144.5",
+      "bunch at mid after leftovers cleared",
     );
-    assert.ok(s.orders.some((o) => o.id === "leftover-sell"));
     const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
     assert.ok(
       s.orders.some((o) => o.side === "buy" && Math.abs(o.price - buy) < 0.05) ||
         s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 0.05),
-      "±1 buy next to mid bunch",
+      "±1 buy after bunch",
     );
   });
 

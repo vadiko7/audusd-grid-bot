@@ -820,7 +820,7 @@ function isMineOrder(order: GridOrder): boolean {
 }
 
 function cancelAll(state: EngineState, reason: string) {
-  const force = /disarm|flatten/i.test(reason);
+  const force = /disarm|flatten|impulse cool/i.test(reason);
   const mine = state.orders.filter((o) => isMineOrder(o) && (force || !isHoldOrder(o)));
   if (mine.length === 0) {
     state.lastCleanReason = reason;
@@ -834,7 +834,7 @@ function cancelAll(state: EngineState, reason: string) {
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {
   if (!isMineOrder(order)) return;
-  if (isHoldOrder(order) && !/disarm|flatten/i.test(why)) {
+  if (isHoldOrder(order) && !/disarm|flatten|impulse cool/i.test(why)) {
     pushLog(state, "info", `hold ${order.side.toUpperCase()} ${order.price.toFixed(state.config.market.priceDecimals)} — leave until fill (${why})`);
     return;
   }
@@ -1200,45 +1200,6 @@ export function resetSession(state: EngineState): EngineState {
   return next;
 }
 
-function rememberLeftovers(state: EngineState, why: string) {
-  let n = 0;
-  const ids = new Set(state.holdIds);
-  const levels = validLevels(state);
-  state.orders = state.orders.map((o) => {
-    if (!isMineOrder(o) || isHoldOrder(o)) return o;
-    const onPair =
-      sameRung(o.price, levels.buy, state.factor) || sameRung(o.price, levels.sell, state.factor);
-    if (onPair) return o;
-    n += 1;
-    if (!o.id.startsWith("pending:")) ids.add(o.id);
-    return { ...o, holdUntilFill: true };
-  });
-  state.holdIds = [...ids];
-  if (n) pushLog(state, "impulse", `remember ${n} leftover limit(s) until fill — ${why}`);
-}
-
-function cancelPreImpulsePair(state: EngineState) {
-  const levels = validLevels(state);
-  const keep: GridOrder[] = [];
-  let n = 0;
-  for (const o of state.orders) {
-    if (!isMineOrder(o) || isHoldOrder(o)) {
-      keep.push(o);
-      continue;
-    }
-    const onPair =
-      sameRung(o.price, levels.buy, state.factor) || sameRung(o.price, levels.sell, state.factor);
-    if (!onPair) {
-      keep.push(o);
-      continue;
-    }
-    dropOrder(state, o, "pre-impulse ±1 leftover");
-    n += 1;
-  }
-  state.orders = keep;
-  if (n) pushLog(state, "clean", `clean ${n} pre-impulse ±1 leftover(s) — other limits held until fill`);
-}
-
 const BUNCH_CAP_LEVELS = 8;
 const BUNCH_LEAVE_LEVELS = 8;
 
@@ -1255,25 +1216,21 @@ function impulseCoolCatch(state: EngineState): void {
   const distPct = (Math.abs(state.mark - anchor) / anchor) * 100;
   const prox = acc ? accumulateProxPct(state) : proximityPct(state.spacingPct, m);
   const far = distPct > prox;
-  rememberLeftovers(state, far ? "impulse cool far" : "impulse cool near");
+  cancelAll(state, "impulse cool leftovers");
+  state.orders = state.orders.filter((o) => !isMineOrder(o));
+  state.holdIds = [];
   if (!far) {
     pushLog(
       state,
       "impulse",
-      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% — leftovers held, ±1 around last fill`,
+      `impulse cool near Δ ${distPct.toFixed(2)}% < prox ${prox.toFixed(2)}% — bot leftovers cleared, ±1 around last fill`,
     );
     return;
   }
   const mid = roundPrice(state.mark, m.priceDecimals);
-  if (state.orders.some((o) => isHoldOrder(o) && sameRung(o.price, mid, state.factor))) {
-    pushLog(state, "impulse", "impulse cool — bunch already resting at mid until fill");
-    state.lastFillPrice = mid;
-    state.lastFillAt = state.now;
-    return;
-  }
   const side: Side = state.mark > anchor ? "sell" : "buy";
   if (acc && cooledFrom === "sell" && side === "buy") {
-    pushLog(state, "impulse", "impulse cool after dump — no knife-catch buy bunch, ±1 only");
+    pushLog(state, "impulse", "impulse cool after dump — leftovers cleared, no knife-catch buy bunch, ±1 only");
     return;
   }
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
@@ -1336,7 +1293,6 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", "impulse cool skip — qty below Lighter min, continue as is");
     return;
   }
-  cancelPreImpulsePair(state);
   const why = `impulse-cool bunch ${nLevels} lvl @ mid`;
   if (
     !placeLimit(state, side, mid, why, {

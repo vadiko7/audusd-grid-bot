@@ -123,6 +123,7 @@ export type EngineState = {
   actions: EngineAction[];
   cancelledIds: string[];
   impulseJustCooled: boolean;
+  impulseCooledFrom: Impulse | null;
   foreignMargin: number;
   cancelSentAt: Record<string, number>;
   unackedPosDelta: number;

@@ -96,6 +96,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     actions: [],
     cancelledIds: [],
     impulseJustCooled: false,
+    impulseCooledFrom: null,
     foreignMargin: 0,
     cancelSentAt: {},
     unackedPosDelta: 0,
@@ -1086,6 +1087,7 @@ function updateImpulse(state: EngineState, input: StepInput) {
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
       state.impulseJustCooled = true;
+      state.impulseCooledFrom = state.impulse;
       if (isAccumulate(state)) {
         pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch missed rungs then ±1`);
       } else {
@@ -1242,6 +1244,8 @@ const BUNCH_LEAVE_LEVELS = 8;
 function impulseCoolCatch(state: EngineState): void {
   if (!state.impulseJustCooled) return;
   state.impulseJustCooled = false;
+  const cooledFrom = state.impulseCooledFrom;
+  state.impulseCooledFrom = null;
   const anchor = fillAnchor(state);
   if (!anchor || state.mark <= 0 || !state.config.armed) return;
   const acc = isAccumulate(state);
@@ -1267,6 +1271,10 @@ function impulseCoolCatch(state: EngineState): void {
     return;
   }
   const side: Side = state.mark > anchor ? "sell" : "buy";
+  if (acc && cooledFrom === "sell" && side === "buy") {
+    pushLog(state, "impulse", "impulse cool after dump — no knife-catch buy bunch, ±1 only");
+    return;
+  }
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse cool far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
     return;

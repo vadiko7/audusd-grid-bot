@@ -1259,6 +1259,37 @@ describe("SPCX accumulate", () => {
     assert.ok(sells.every((a) => a.reduceOnly));
   });
 
+  it("accumulate dump cool does not knife-catch a buy bunch — ±1 only", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    const last = 140;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    const t0 = 10_000;
+    s.markHistory = [
+      { t: t0, p: 140 },
+      { t: t0 + 50_000, p: 136 },
+    ];
+    setArmed(s, true);
+    const live = liveAccount({
+      equity: 2000,
+      position: { size: 4, entry: 138 },
+      positionNotional: 544,
+      orders: [],
+    });
+    step(s, { now: t0 + 50_000, mark: 136, live });
+    assert.equal(s.impulse, "sell");
+    s.actions = [];
+    for (let i = 1; i <= 40; i++) {
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: 136.05, live });
+      if (s.impulse === "none") break;
+    }
+    assert.equal(s.impulse, "none");
+    assert.ok(s.logs.some((l) => l.message.includes("no knife-catch")));
+    assert.ok(!s.orders.some((o) => o.holdUntilFill && o.side === "buy"));
+  });
+
   it("harvest sell at/above highest_lvl is 25% of ticket floored at $13, scales with $/lvl", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     s.lastFillPrice = 140;

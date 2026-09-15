@@ -1290,6 +1290,56 @@ describe("SPCX accumulate", () => {
     assert.ok(!s.orders.some((o) => o.holdUntilFill && o.side === "buy"));
   });
 
+  it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    const last = 140;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = last;
+    s.position = { size: 5, entry: 138 };
+    const t0 = 10_000;
+    const leftover = {
+      id: "leftover-sell",
+      side: "sell" as const,
+      price: 144.5,
+      qty: 0.05,
+      notional: 7.2,
+      placedAt: t0,
+      mine: true,
+    };
+    s.holdIds = ["leftover-sell"];
+    s.markHistory = [
+      { t: t0, p: 140 },
+      { t: t0 + 50_000, p: 145 },
+    ];
+    setArmed(s, true);
+    const live = liveAccount({
+      equity: 10_000,
+      position: { size: 5, entry: 138 },
+      positionNotional: 725,
+      orders: [leftover],
+    });
+    step(s, { now: t0 + 50_000, mark: 145, live });
+    assert.equal(s.impulse, "buy");
+    for (let i = 1; i <= 40; i++) {
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: 145.05, live });
+      if (s.impulse === "none") break;
+    }
+    assert.equal(s.impulse, "none");
+    const mid = 145.05;
+    assert.ok(
+      s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - mid) < 0.05),
+      "bunch at mid despite leftover 144.5",
+    );
+    assert.ok(s.orders.some((o) => o.id === "leftover-sell"));
+    const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(
+      s.orders.some((o) => o.side === "buy" && Math.abs(o.price - buy) < 0.05) ||
+        s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 0.05),
+      "±1 buy next to mid bunch",
+    );
+  });
+
   it("harvest sell at/above highest_lvl is 25% of ticket floored at $13, scales with $/lvl", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     s.lastFillPrice = 140;

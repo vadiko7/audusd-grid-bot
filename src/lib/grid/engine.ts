@@ -583,11 +583,12 @@ function soldRungRecently(state: EngineState, price: number): boolean {
   return state.soldRungs.some((r) => sameRung(r.price, price, state.factor) && state.now - r.at < SOLD_RUNG_MS);
 }
 
-function hasNear(state: EngineState, target: number, side?: Side): boolean {
+function hasNear(state: EngineState, target: number, side?: Side, opts?: { rungOnly?: boolean }): boolean {
   const prox = isAccumulate(state) ? accumulateProxPct(state) : 0;
   return state.orders.some((o) => {
     if (side && o.side !== side) return false;
     if (sameRung(o.price, target, state.factor)) return true;
+    if (opts?.rungOnly || isHoldOrder(o)) return false;
     if (!isMineOrder(o)) return false;
     return isAccumulate(state) && inProximity(o.price, target, prox);
   });
@@ -645,7 +646,7 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
     };
   }
 
-  if (hasNear(state, target, side)) {
+  if (hasNear(state, target, side, opts.holdUntilFill ? { rungOnly: true } : undefined)) {
     return { reason: `proximity to existing @ ${target.toFixed(5)}`, extra: { target } };
   }
 

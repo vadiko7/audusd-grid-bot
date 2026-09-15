@@ -320,6 +320,7 @@ function detectFills(state: EngineState): Fill[] {
         price: order.price,
         qty: order.qty,
         ts: now,
+        catchLot: order.catchLot,
       });
     }
   }
@@ -424,6 +425,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
       price: cand.price,
       qty: cand.qty,
       ts: state.now,
+      catchLot: cand.catchLot,
     };
     state.fillsThisCycle.push(fill);
     if (cand.side === "sell") rememberSoldRung(state, cand.price);
@@ -438,6 +440,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
       price: o.price,
       qty: o.qty,
       ts: state.now,
+      catchLot: o.catchLot,
     };
     state.fillsThisCycle.push(fill);
     if (o.side === "sell") rememberSoldRung(state, o.price);
@@ -529,9 +532,13 @@ function applyHoldFlags(state: EngineState, prev: GridOrder[], next: GridOrder[]
   const pendingHolds = prev.filter((o) => isHoldOrder(o) && o.id.startsWith("pending:"));
   const remembered = new Set(state.holdIds);
   const out = next.map((o) => {
-    if (byId.has(o.id) || remembered.has(o.id)) return { ...o, holdUntilFill: true, mine: true };
+    if (byId.has(o.id) || remembered.has(o.id)) {
+      const prevHold = byId.get(o.id);
+      return { ...o, holdUntilFill: true, mine: true, catchLot: prevHold?.catchLot || o.catchLot };
+    }
     if (pendingHolds.some((p) => p.side === o.side && sameRung(p.price, o.price, state.factor))) {
-      return { ...o, holdUntilFill: true, mine: true };
+      const src = pendingHolds.find((p) => p.side === o.side && sameRung(p.price, o.price, state.factor));
+      return { ...o, holdUntilFill: true, mine: true, catchLot: src?.catchLot || o.catchLot };
     }
     return o;
   });
@@ -570,6 +577,8 @@ function historyWouldHaveHit(state: EngineState, order: GridOrder): boolean {
 
 const SOLD_RUNG_MS = 12 * 60 * 60 * 1000;
 const PENDING_MS = 45_000;
+const BUNCH_CAP_LEVELS = 8;
+const BUNCH_LEAVE_LEVELS = 8;
 
 function rememberSoldRung(state: EngineState, price: number) {
   const px = roundPrice(price, state.config.market.priceDecimals);
@@ -601,6 +610,7 @@ type PlaceOpts = {
   allowImpulse?: boolean;
   allowExtra?: boolean;
   holdUntilFill?: boolean;
+  catchLot?: boolean;
 };
 
 function gateCandidate(state: EngineState, side: Side, target: number, opts: PlaceOpts = {}): GateFail | null {
@@ -791,6 +801,7 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
     placedAt: state.now,
     mine: true,
     holdUntilFill: opts.holdUntilFill || undefined,
+    catchLot: opts.catchLot || undefined,
   };
   state.orders = [...state.orders, order];
   if (opts.holdUntilFill) {
@@ -1020,7 +1031,42 @@ export function maintainPair(state: EngineState, why: string) {
   if (needBuy) placeLimit(state, "buy", levels.buy, why);
 }
 
+function placeCatchExits(state: EngineState) {
+  if (!isAccumulate(state)) return;
+  const m = state.config.market;
+  const tpF = tpFactorOf(m, state.factor);
+  for (const fill of state.fillsThisCycle) {
+    if (fill.side !== "buy" || !fill.catchLot) continue;
+    const px = upLevel(fill.price, tpF, m.priceDecimals);
+    if (hasNear(state, px, "sell")) continue;
+    const one = baseQty(state.mark > 0 ? state.mark : fill.price, state.config.orderNotional, m.sizeDecimals);
+    const leaveQty = roundQty(one * BUNCH_LEAVE_LEVELS, m.sizeDecimals);
+    const pos = Math.abs(state.position.size);
+    const maxClose = roundQty(Math.max(0, pos - leaveQty), m.sizeDecimals);
+    let qty = roundQty(Math.min(fill.qty, maxClose), m.sizeDecimals);
+    qty = liftQtyToMins(state, qty, px);
+    if (qty > maxClose + 1e-12) continue;
+    if (!meetsExchangeMins(state, qty, px)) continue;
+    if (
+      placeLimit(state, "sell", px, "catch-exit — sell dump add only, not core", {
+        qty,
+        reduceOnly: true,
+        allowExtra: true,
+        holdUntilFill: true,
+      })
+    ) {
+      pushLog(
+        state,
+        "place",
+        `catch-exit SELL ${px.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} — dump add only (core left)`,
+        { side: "sell", price: px, qty, catch: true },
+      );
+    }
+  }
+}
+
 function postFillMissed(state: EngineState, fill: Fill) {
+  placeCatchExits(state);
   const m = state.config.market;
   const { sell: up, buy: down } = levelsFromAnchor(fill.price, m, state.factor);
   const keep: GridOrder[] = [];
@@ -1104,7 +1150,7 @@ function updateImpulse(state: EngineState, input: StepInput) {
       pushLog(
         state,
         "impulse",
-        `impulse SELL — block new buys, no knife-catch bunch (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        `impulse SELL — no new buys while hot; after cool buy a small add and sell that add (Δ ${resolved.deltaPct.toFixed(3)}%)`,
       );
     } else {
       pushLog(
@@ -1200,9 +1246,6 @@ export function resetSession(state: EngineState): EngineState {
   return next;
 }
 
-const BUNCH_CAP_LEVELS = 8;
-const BUNCH_LEAVE_LEVELS = 8;
-
 function impulseCoolCatch(state: EngineState): void {
   if (!state.impulseJustCooled) return;
   state.impulseJustCooled = false;
@@ -1229,10 +1272,7 @@ function impulseCoolCatch(state: EngineState): void {
   }
   const mid = roundPrice(state.mark, m.priceDecimals);
   const side: Side = state.mark > anchor ? "sell" : "buy";
-  if (acc && cooledFrom === "sell" && side === "buy") {
-    pushLog(state, "impulse", "impulse cool after dump — leftovers cleared, no knife-catch buy bunch, ±1 only");
-    return;
-  }
+  const dumpCatch = acc && cooledFrom === "sell" && side === "buy";
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse cool far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
     return;
@@ -1293,13 +1333,16 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", "impulse cool skip — qty below Lighter min, continue as is");
     return;
   }
-  const why = `impulse-cool bunch ${nLevels} lvl @ mid`;
+  const why = dumpCatch
+    ? `dump-catch BUY bunch ${nLevels} lvl @ mid — sell this add later, not core`
+    : `impulse-cool bunch ${nLevels} lvl @ mid`;
   if (
     !placeLimit(state, side, mid, why, {
       qty,
       reduceOnly,
       allowExtra: true,
       holdUntilFill: true,
+      catchLot: dumpCatch,
     })
   ) {
     pushLog(state, "impulse", "impulse cool bunch not placed — continue as is");
@@ -1308,12 +1351,14 @@ function impulseCoolCatch(state: EngineState): void {
   state.lastFillPrice = mid;
   state.lastFillSide = side;
   state.lastFillAt = state.now;
-  if (acc) ratchetHighest(state, mid, "cool bunch placed");
+  if (acc && !dumpCatch) ratchetHighest(state, mid, "cool bunch placed");
   pushLog(
     state,
     "place",
-    `impulse cool LIMIT ${side.toUpperCase()} ${mid.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} lvl (cap ${BUNCH_CAP_LEVELS}, leave ${BUNCH_LEAVE_LEVELS}) · Δ ${distPct.toFixed(2)}% — lastFill now mid, hold until fill`,
-    { side, price: mid, qty, exec: "limit", n: nLevels, distPct, prox, hold: true },
+    dumpCatch
+      ? `dump-catch LIMIT BUY ${mid.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} lvl (leave ${BUNCH_LEAVE_LEVELS}) — small add, sell this part on bounce`
+      : `impulse cool LIMIT ${side.toUpperCase()} ${mid.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} lvl (cap ${BUNCH_CAP_LEVELS}, leave ${BUNCH_LEAVE_LEVELS}) · Δ ${distPct.toFixed(2)}% — lastFill now mid, hold until fill`,
+    { side, price: mid, qty, exec: "limit", n: nLevels, distPct, prox, hold: true, catch: dumpCatch },
   );
 }
 

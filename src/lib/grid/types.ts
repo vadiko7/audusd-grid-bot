@@ -25,8 +25,6 @@ export type GridOrder = {
   mine?: boolean;
   /** Impulse-cool bunch: rest at mid until fill. Never cancel as extra. */
   holdUntilFill?: boolean;
-  /** Dump-catch add: when it fills, sell this qty only — not the core. */
-  catchLot?: boolean;
 };
 
 export type Position = {
@@ -40,7 +38,6 @@ export type Fill = {
   price: number;
   qty: number;
   ts: number;
-  catchLot?: boolean;
 };
 
 export type Candle = {

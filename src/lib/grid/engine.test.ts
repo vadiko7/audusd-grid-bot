@@ -1269,7 +1269,7 @@ describe("SPCX accumulate", () => {
     assert.ok(sells.every((a) => a.reduceOnly));
   });
 
-  it("dump cool buys a small add then sells only that add, not the core", () => {
+  it("dump cool uses the same leftovers → bunch → ±1 path", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     const last = 140;
     s.lastFillPrice = last;
@@ -1295,23 +1295,19 @@ describe("SPCX accumulate", () => {
       if (s.impulse === "none") break;
     }
     assert.equal(s.impulse, "none");
-    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && o.catchLot);
-    assert.ok(bunch, "dump-catch buy bunch at mid");
-    assert.ok(bunch.qty < 2, "add is a small part of the 4-lot core");
-    const filled = liveAccount({
-      equity: 2000,
-      position: { size: 4 + bunch.qty, entry: 137.5 },
-      positionNotional: (4 + bunch.qty) * 136.05,
-      orders: [],
-    });
-    step(s, { now: t0 + 200_000, mark: 136.05, live: filled });
-    const exit = s.actions.find(
-      (a) => a.type === "place" && a.side === "sell" && a.why.includes("catch-exit"),
+    const mid = 136.05;
+    assert.ok(
+      s.orders.some((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - mid) < 0.05),
+      "buy bunch at mid",
     );
-    assert.ok(exit && exit.type === "place", "sell the dump add");
-    assert.ok(Math.abs(exit.qty - bunch.qty) < 0.08, "exit qty = catch add, not core");
-    assert.ok(exit.qty < 2, "does not sell the original 4");
-    assert.ok(exit.reduceOnly);
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - mid) < 0.05);
+    const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
+    assert.ok(
+      s.orders.some((o) => o.side === "buy" && !o.holdUntilFill && Math.abs(o.price - buy) < 0.05) ||
+        s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 0.05),
+      "±1 after bunch",
+    );
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.why.includes("catch-exit")));
   });
 
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {

@@ -1072,7 +1072,7 @@ describe("engine cycle", () => {
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === holdId));
   });
 
-  it("impulse cool reducing bunch skipped when it cannot leave 8 levels", () => {
+  it("impulse cool reducing bunch on a small book leaves 1 lvl, not 8", () => {
     const s = createInitialState({ startingEquity: 8000 });
     const t0 = 100_000;
     for (let i = 0; i < 10; i++) run(s, 0.7, t0 + i * 2_000);
@@ -1084,8 +1084,10 @@ describe("engine cycle", () => {
     assert.equal(s.impulse, "sell");
     for (let i = 1; i <= 35; i++) run(s, 0.68, t0 + 50_000 + i * 2_000);
     assert.equal(s.impulse, "none");
-    assert.ok(!s.orders.some((o) => o.holdUntilFill && Math.abs(o.price - 0.68) < 1e-6));
-    assert.ok(Math.abs((s.lastFillPrice ?? 0) - 0.7) < 1e-8);
+    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - 0.68) < 1e-6);
+    assert.ok(bunch, "3-ticket book still bunches 1+ lvl and leaves 1");
+    assert.ok(bunch.qty + 1e-9 >= baseQty(0.68));
+    assert.ok(bunch.qty <= 2 * baseQty(0.68) + 1e-6);
   });
 
   it("impulse cool near last fill uses a limit at mark then ±1", () => {
@@ -1361,6 +1363,39 @@ describe("SPCX accumulate", () => {
       "±1 after bunch",
     );
     assert.ok(!s.actions.some((a) => a.type === "place" && a.why.includes("catch-exit")));
+  });
+
+  it("NATGAS 1-step dump cool still bunches a hold-until-fill buy at mid", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 10_000 });
+    const last = 2.85;
+    s.lastFillPrice = last;
+    s.lastFillAt = 1;
+    s.highestLvl = last;
+    s.position = { size: 40, entry: 2.8 };
+    const t0 = 10_000;
+    const dumped = roundPrice(last / NATGAS.defaultFactor, NATGAS.priceDecimals);
+    s.markHistory = [
+      { t: t0, p: last },
+      { t: t0 + 50_000, p: dumped },
+    ];
+    setArmed(s, true);
+    const live = liveAccount({
+      equity: 10_000,
+      position: { size: 40, entry: 2.8 },
+      positionNotional: 40 * dumped,
+      orders: [],
+    });
+    step(s, { now: t0 + 50_000, mark: dumped, live });
+    assert.equal(s.impulse, "sell");
+    for (let i = 1; i <= 40; i++) {
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: dumped, live });
+      if (s.impulse === "none") break;
+    }
+    assert.equal(s.impulse, "none");
+    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
+    assert.ok(bunch, "1 missed rung must bunch");
+    assert.ok(Math.abs(bunch.price - dumped) < 0.01);
+    assert.equal(bunch.holdUntilFill, true);
   });
 
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {

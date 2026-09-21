@@ -124,6 +124,8 @@ export type EngineState = {
   cancelledIds: string[];
   impulseJustCooled: boolean;
   impulseCooledFrom: Impulse | null;
+  /** lastFill (or mark) when the current impulse started — bunch distance uses this, not a later harvest fill. */
+  impulseOrigin: number | null;
   foreignMargin: number;
   cancelSentAt: Record<string, number>;
   unackedPosDelta: number;

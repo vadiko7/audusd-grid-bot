@@ -1324,6 +1324,46 @@ describe("SPCX accumulate", () => {
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
   });
 
+  it("sell→buy flip buys the dump size at the bounce and sells above it", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    const t0 = 10_000;
+    s.markHistory = [
+      { t: t0, p: 140 },
+      { t: t0 + 50_000, p: 136 },
+    ];
+    setArmed(s, true);
+    const down = liveAccount({
+      equity: 8000,
+      position: { size: 4, entry: 138 },
+      positionNotional: 544,
+      orders: [],
+    });
+    step(s, { now: t0 + 50_000, mark: 136, live: down });
+    assert.equal(s.impulse, "sell");
+    assert.ok(Math.abs((s.impulseExtreme ?? 0) - 136) < 0.05);
+    step(s, {
+      now: t0 + 100_000,
+      mark: 142,
+      live: liveAccount({
+        equity: 8000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 568,
+        orders: [],
+      }),
+    });
+    assert.equal(s.impulse, "buy");
+    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
+    assert.ok(bunch, "buy the finished dump immediately");
+    assert.ok(Math.abs(bunch.price - 142) < 0.05);
+    const one = baseQty(142, 25, SPCX.sizeDecimals);
+    assert.ok(bunch.qty + 1e-9 >= one * 2, "qty follows the dump, not the bounce");
+    assert.ok(s.orders.some((o) => o.side === "sell" && o.price > bunch.price), "sell sits above the buy");
+  });
+
   it("dump cool uses the same leftovers → bunch → ±1 path", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     const last = 140;

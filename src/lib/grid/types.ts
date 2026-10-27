@@ -124,8 +124,12 @@ export type EngineState = {
   cancelledIds: string[];
   impulseJustCooled: boolean;
   impulseCooledFrom: Impulse | null;
-  /** lastFill (or mark) when the current impulse started — bunch distance uses this, not a later harvest fill. */
+  /** True when buy↔sell flipped without cooling — bunch the finished impulse immediately. */
+  impulseFlipCatch: boolean;
+  /** lastFill (or mark) when the current impulse started. */
   impulseOrigin: number | null;
+  /** Furthest mark in the impulse direction. Bunch size uses this, not the bounce. */
+  impulseExtreme: number | null;
   foreignMargin: number;
   cancelSentAt: Record<string, number>;
   unackedPosDelta: number;

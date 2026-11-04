@@ -36,6 +36,37 @@ export function nextImpulse(prev: Impulse, signedPct: number, trigger = IMPULSE_
   return prev;
 }
 
+/** Move from anchor (last fill or post-cool mark). No time window. */
+export function excursionImpulse(opts: {
+  prev: Impulse;
+  mark: number;
+  anchor: number;
+  extreme: number | null;
+  trigger: number;
+  cool: number;
+}): { impulse: Impulse; deltaPct: number } {
+  const { prev, mark, anchor, trigger, cool } = opts;
+  if (!(mark > 0) || !(anchor > 0) || !(trigger > 0)) return { impulse: "none", deltaPct: 0 };
+  const fromOrigin = ((mark - anchor) / anchor) * 100;
+  if (prev === "none" || opts.extreme == null) {
+    if (fromOrigin >= trigger) return { impulse: "buy", deltaPct: fromOrigin };
+    if (fromOrigin <= -trigger) return { impulse: "sell", deltaPct: fromOrigin };
+    return { impulse: "none", deltaPct: fromOrigin };
+  }
+  if (prev === "sell") {
+    const low = Math.min(opts.extreme, mark);
+    const bounce = low > 0 ? ((mark - low) / low) * 100 : 0;
+    if (bounce >= trigger) return { impulse: "buy", deltaPct: bounce };
+    if (bounce >= cool) return { impulse: "none", deltaPct: fromOrigin };
+    return { impulse: "sell", deltaPct: fromOrigin };
+  }
+  const high = Math.max(opts.extreme, mark);
+  const dip = high > 0 ? ((high - mark) / high) * 100 : 0;
+  if (dip >= trigger) return { impulse: "sell", deltaPct: -dip };
+  if (dip >= cool) return { impulse: "none", deltaPct: fromOrigin };
+  return { impulse: "buy", deltaPct: fromOrigin };
+}
+
 export function resolveImpulse(opts: {
   prev: Impulse;
   history: MarkTick[];

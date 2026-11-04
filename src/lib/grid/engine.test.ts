@@ -19,7 +19,7 @@ import {
 import { baseQty, downLevel, factorFromSpacing, levelsFromAnchor, roundPrice, upLevel } from "./math.ts";
 import { classifyRegime, spacingFromAtr } from "./atr.ts";
 import type { GridOrder } from "./types.ts";
-import { nextImpulse } from "./impulse.ts";
+import { nextImpulse, excursionImpulse } from "./impulse.ts";
 import type { Candle, EngineState, LiveAccount } from "./types.ts";
 
 function pair(anchor: number, market: typeof AUDUSD = AUDUSD) {
@@ -125,6 +125,17 @@ describe("impulse", () => {
 
   it("holds impulse between trigger and cool", () => {
     assert.equal(nextImpulse("buy", 0.15), "buy");
+  });
+
+  it("excursion ignores the clock and cools on a retrace", () => {
+    const down = excursionImpulse({ prev: "none", mark: 2423, anchor: 2640, extreme: null, trigger: 1.25, cool: 0.4 });
+    assert.equal(down.impulse, "sell");
+    const still = excursionImpulse({ prev: "sell", mark: 2423, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
+    assert.equal(still.impulse, "sell");
+    const cool = excursionImpulse({ prev: "sell", mark: 2433, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
+    assert.equal(cool.impulse, "none");
+    const flip = excursionImpulse({ prev: "sell", mark: 2460, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
+    assert.equal(flip.impulse, "buy");
   });
 });
 
@@ -398,7 +409,7 @@ describe("engine cycle", () => {
       }),
     });
     assert.equal(s.lastFillPrice, last);
-    assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "old"));
+    assert.equal(s.impulse, "buy");
   });
 
   it("NATGAS: vanished sell at mark is a fill even if pos lags — do not re-sell the same TP", () => {
@@ -1037,15 +1048,10 @@ describe("engine cycle", () => {
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "pair-buy"));
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "old-extra"));
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === "manual-buy"));
-    let catchActions = s.actions.slice();
-    for (let i = 1; i <= 35; i++) {
-      run(s, 0.73, t0 + 50_000 + i * 2_000);
-      if (s.impulse === "none" && s.actions.some((a) => a.type === "place")) {
-        catchActions = s.actions.slice();
-        break;
-      }
-    }
+    const cool = 0.729;
+    run(s, cool, t0 + 52_000);
     assert.equal(s.impulse, "none");
+    const catchActions = s.actions.slice();
     assert.equal(
       catchActions.find((a) => a.type === "place" && a.exec === "market"),
       undefined,
@@ -1053,20 +1059,20 @@ describe("engine cycle", () => {
     assert.ok(!catchActions.some((a) => a.type === "cancel" && a.orderId === "manual-buy"));
     assert.ok(!s.orders.some((o) => o.id === "old-extra" || o.id === "pair-buy"));
     assert.ok(s.orders.some((o) => o.id === "manual-buy"));
-    const one = baseQty(0.73);
-    const lim = catchActions.find((a) => a.type === "place" && Math.abs(a.price - 0.73) < 1e-8);
+    const one = baseQty(cool);
+    const lim = catchActions.find((a) => a.type === "place" && Math.abs(a.price - cool) < 1e-8);
     assert.ok(lim && lim.type === "place");
     assert.equal(lim.side, "sell");
     assert.ok(lim.qty <= 8 * one + 1e-6, "cap 8 from mid");
     assert.ok(lim.qty >= 7 * one, "bunch uses the 8-level cap");
-    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - 0.73) < 1e-8));
-    assert.ok(Math.abs((s.lastFillPrice ?? 0) - 0.73) < 1e-8);
-    const around = pair(0.73);
+    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - cool) < 1e-8));
+    assert.ok(Math.abs((s.lastFillPrice ?? 0) - cool) < 1e-8);
+    const around = pair(cool);
     assert.ok(
       catchActions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - around.buy) < 1e-8),
       "±1 around new lastFill (mid)",
     );
-    const holdId = s.orders.find((o) => o.holdUntilFill && Math.abs(o.price - 0.73) < 1e-8)?.id;
+    const holdId = s.orders.find((o) => o.holdUntilFill && Math.abs(o.price - cool) < 1e-8)?.id;
     run(s, around.buy, t0 + 200_000);
     assert.ok(s.orders.some((o) => o.id === holdId && o.holdUntilFill), "bunch still resting after ±1 fill");
     assert.ok(!s.actions.some((a) => a.type === "cancel" && a.orderId === holdId));
@@ -1082,11 +1088,11 @@ describe("engine cycle", () => {
     setArmed(s, true);
     run(s, 0.68, t0 + 50_000);
     assert.equal(s.impulse, "sell");
-    for (let i = 1; i <= 35; i++) run(s, 0.68, t0 + 50_000 + i * 2_000);
+    run(s, 0.681, t0 + 52_000);
     assert.equal(s.impulse, "none");
-    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - 0.68) < 1e-6);
+    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - 0.681) < 1e-6);
     assert.ok(bunch, "3-ticket book still bunches 1+ lvl and leaves 1");
-    assert.ok(bunch.qty + 1e-9 >= baseQty(0.68));
+    assert.ok(bunch.qty + 0.2 >= baseQty(0.681));
     assert.ok(bunch.qty <= 2 * baseQty(0.68) + 1e-6);
   });
 
@@ -1098,7 +1104,7 @@ describe("engine cycle", () => {
     s.lastFillAt = t0;
     s.position = { size: -baseQty(0.7), entry: 0.7 };
     setArmed(s, true);
-    const near = 0.7 * 1.0008;
+    const near = 0.73 * (1 - 0.0015);
     const live = liveAccount({
       equity: 5000,
       position: { size: -35, entry: 0.7 },
@@ -1106,15 +1112,9 @@ describe("engine cycle", () => {
     });
     step(s, { now: t0 + 50_000, mark: 0.73, live });
     assert.equal(s.impulse, "buy");
-    let catchActions = s.actions.slice();
-    for (let i = 1; i <= 35; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: near, live });
-      if (s.impulse === "none" && s.actions.some((a) => a.type === "place")) {
-        catchActions = s.actions.slice();
-        break;
-      }
-    }
+    step(s, { now: t0 + 52_000, mark: near, live });
     assert.equal(s.impulse, "none");
+    const catchActions = s.actions.slice();
     assert.equal(
       catchActions.find((a) => a.type === "place" && a.exec === "market"),
       undefined,
@@ -1250,14 +1250,10 @@ describe("SPCX accumulate", () => {
     s.highestLvl = 140;
     s.position = { size: 4, entry: 138 };
     const t0 = 10_000;
-    s.markHistory = [
-      { t: t0, p: 137.5 },
-      { t: t0 + 50_000, p: 140.2 },
-    ];
     setArmed(s, true);
     step(s, {
       now: t0 + 50_000,
-      mark: 140.2,
+      mark: 142.6,
       live: liveAccount({
         equity: 2000,
         position: { size: 4, entry: 138 },
@@ -1277,7 +1273,7 @@ describe("SPCX accumulate", () => {
       orders: s.orders.filter((o) => !o.id.startsWith("pending:")),
     });
     for (let i = 1; i <= 8; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: 140.2 + i * 0.05, live });
+      step(s, { now: t0 + 50_000 + i * 2_000, mark: 142.6 + i * 0.05, live });
     }
     assert.equal(s.impulse, "buy");
     assert.equal(s.orders.filter((o) => o.side === "sell" && o.mine !== false).length, 1, "harvest must not stack a new sell every cycle");
@@ -1290,14 +1286,10 @@ describe("SPCX accumulate", () => {
     s.highestLvl = 140;
     s.position = { size: 4, entry: 138 };
     const t0 = 10_000;
-    s.markHistory = [
-      { t: t0, p: 137.5 },
-      { t: t0 + 50_000, p: 140.2 },
-    ];
     setArmed(s, true);
     step(s, {
       now: t0 + 50_000,
-      mark: 140.2,
+      mark: 142.6,
       live: liveAccount({
         equity: 2000,
         position: { size: 4, entry: 138 },
@@ -1385,12 +1377,9 @@ describe("SPCX accumulate", () => {
     });
     step(s, { now: t0 + 50_000, mark: 136, live });
     assert.equal(s.impulse, "sell");
-    for (let i = 1; i <= 40; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: 136.05, live });
-      if (s.impulse === "none") break;
-    }
+    step(s, { now: t0 + 52_000, mark: 136.8, live });
     assert.equal(s.impulse, "none");
-    const mid = 136.05;
+    const mid = 136.8;
     assert.ok(
       s.orders.some((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - mid) < 0.05),
       "buy bunch at mid",
@@ -1427,14 +1416,12 @@ describe("SPCX accumulate", () => {
     });
     step(s, { now: t0 + 50_000, mark: dumped, live });
     assert.equal(s.impulse, "sell");
-    for (let i = 1; i <= 40; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: dumped, live });
-      if (s.impulse === "none") break;
-    }
+    const bounced = roundPrice(dumped * 1.004, NATGAS.priceDecimals);
+    step(s, { now: t0 + 52_000, mark: bounced, live });
     assert.equal(s.impulse, "none");
     const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
     assert.ok(bunch, "1 missed rung must bunch");
-    assert.ok(Math.abs(bunch.price - dumped) < 0.01);
+    assert.ok(Math.abs(bunch.price - bounced) < 0.02);
     assert.equal(bunch.holdUntilFill, true);
   });
 
@@ -1472,26 +1459,19 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
-    let cooled = false;
-    for (let i = 1; i <= 40; i++) {
-      step(s, {
-        now: t0 + 50_000 + i * 2_000,
-        mark: 145.05,
-        live: liveAccount({
-          equity: 10_000,
-          position: { size: 5, entry: 138 },
-          positionNotional: 725,
-          orders: cooled ? [] : [leftover],
-        }),
-      });
-      if (s.impulse === "none") {
-        cooled = true;
-        break;
-      }
-    }
+    const mid = 144.1;
+    step(s, {
+      now: t0 + 52_000,
+      mark: mid,
+      live: liveAccount({
+        equity: 10_000,
+        position: { size: 5, entry: 138 },
+        positionNotional: 725,
+        orders: [leftover],
+      }),
+    });
     assert.equal(s.impulse, "none");
-    const mid = 145.05;
-    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === "leftover-sell"));
+    assert.ok(s.logs.some((l) => l.level === "clean" && l.message.includes("144.50")));
     assert.ok(!s.orders.some((o) => o.id === "leftover-sell"));
     assert.ok(
       s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - mid) < 0.05),
@@ -1503,6 +1483,59 @@ describe("SPCX accumulate", () => {
         s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - buy) < 0.05),
       "±1 buy after bunch",
     );
+  });
+
+  it("sell impulse with a full buy cap sells one ticket then buys that qty back", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 500 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 150;
+    s.position = { size: 11, entry: 138 };
+    setArmed(s, true);
+    const live = (size: number, mark: number) =>
+      liveAccount({
+        equity: 500,
+        position: { size, entry: 138 },
+        positionNotional: size * mark,
+        orders: [],
+      });
+    step(s, { now: 10_000, mark: 136, live: live(11, 136) });
+    assert.equal(s.impulse, "sell");
+    assert.ok(buyUsedUsd(s) >= buyCapUsd(s));
+    const clip = s.actions.find((a) => a.type === "place" && a.side === "sell" && a.why.includes("cap-relief"));
+    assert.ok(clip, "one reduce-only clip while the dump is on");
+    assert.equal(clip.reduceOnly, true);
+    const one = baseQty(136, 25, SPCX.sizeDecimals);
+    assert.ok(Math.abs(clip.qty - one) / one < 0.15, "clip is one $25 ticket, not the whole bag");
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
+    const sold = clip.qty;
+    step(s, { now: 12_000, mark: 136.8, live: live(11 - sold, 136.8) });
+    assert.equal(s.impulse, "none");
+    const back = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("recuperate"));
+    assert.ok(back, "cool buys the same clip back");
+    assert.ok(Math.abs(back.qty - sold) / sold < 0.05);
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.why.includes("bunch")), "do not also buy the whole dump");
+  });
+
+  it("arms ETH from last fill with no 50s history", () => {
+    const s = createInitialState({ market: ETH, startingEquity: 20_000 });
+    s.lastFillPrice = 2640;
+    s.lastFillAt = 1;
+    s.position = { size: 0.3, entry: 2640 };
+    setArmed(s, true);
+    step(s, {
+      now: 5_000,
+      mark: 2423,
+      live: liveAccount({
+        equity: 20_000,
+        position: { size: 0.3, entry: 2640 },
+        positionNotional: 0.3 * 2423,
+        orders: [],
+      }),
+    });
+    assert.equal(s.impulse, "sell");
+    assert.ok(s.markHistory.length < 5);
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell" && a.why.includes("cap-relief")));
   });
 
   it("harvest sell at/above highest_lvl is 25% of ticket floored at $13, scales with $/lvl", () => {

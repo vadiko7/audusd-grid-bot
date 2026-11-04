@@ -78,6 +78,10 @@ type SavedSettings = {
       highestLvl?: number;
       holdOrderIds?: string[];
       sold_rungs?: Array<{ price: number; at: number }>;
+      impulseAnchor?: number;
+      reliefQty?: number;
+      reliefBaseline?: number;
+      reliefPrice?: number;
     }
   >;
   orderNotional?: number;
@@ -260,6 +264,8 @@ function saveSettings(book: {
     highestLvl: number | null;
     holdIds: string[];
     soldRungs: Array<{ price: number; at: number }>;
+    impulseAnchor: number | null;
+    relief: { qty: number; baselinePos: number; price: number } | null;
   };
 }) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
@@ -282,6 +288,10 @@ function saveSettings(book: {
     highestLvl: book.engine.highestLvl ?? undefined,
     holdOrderIds: book.engine.holdIds.length ? book.engine.holdIds : undefined,
     sold_rungs: book.engine.soldRungs.length ? book.engine.soldRungs : undefined,
+    impulseAnchor: book.engine.impulseAnchor ?? undefined,
+    reliefQty: book.engine.relief?.qty,
+    reliefBaseline: book.engine.relief?.baselinePos,
+    reliefPrice: book.engine.relief?.price,
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
@@ -364,6 +374,14 @@ function makeBook(market: MarketProfile): Book {
     engine.soldRungs = sold
       .filter((r) => r && Number(r.price) > 0 && Number(r.at) > 0)
       .map((r) => ({ price: Number(r.price), at: Number(r.at) }));
+  }
+  const anchor = Number(savedM?.impulseAnchor);
+  if (Number.isFinite(anchor) && anchor > 0) engine.impulseAnchor = anchor;
+  const reliefQty = Number(savedM?.reliefQty);
+  const reliefBaseline = Number(savedM?.reliefBaseline);
+  const reliefPrice = Number(savedM?.reliefPrice);
+  if (reliefQty > 0 && reliefPrice > 0 && Number.isFinite(reliefBaseline)) {
+    engine.relief = { qty: reliefQty, baselinePos: reliefBaseline, price: reliefPrice };
   }
   const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };

@@ -8,7 +8,7 @@ import {
   VELOCITY_SPIKE_WINDOW_MS,
 } from "./constants.ts";
 import { AUDUSD } from "./markets.ts";
-import { resolveImpulse, velocityPct } from "./impulse.ts";
+import { excursionImpulse, velocityPct } from "./impulse.ts";
 import {
   adverseAgainstLong,
   adverseAgainstShort,
@@ -100,6 +100,8 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     impulseFlipCatch: false,
     impulseOrigin: null,
     impulseExtreme: null,
+    impulseAnchor: null,
+    relief: null,
     foreignMargin: 0,
     cancelSentAt: {},
     unackedPosDelta: 0,
@@ -358,6 +360,7 @@ function applyFill(state: EngineState, fill: Fill) {
   state.lastFillPrice = fill.price;
   state.lastFillSide = fill.side;
   state.lastFillAt = fill.ts;
+  state.impulseAnchor = null;
   if (isAccumulate(state)) ratchetHighest(state, fill.price, "fill");
   if (fill.side === "sell") rememberSoldRung(state, fill.price);
   pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
@@ -452,6 +455,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     state.lastFillPrice = latest.price;
     state.lastFillSide = latest.side;
     state.lastFillAt = latest.ts;
+    state.impulseAnchor = null;
     if (isAccumulate(state)) ratchetHighest(state, latest.price, "fill");
     for (const fill of state.fillsThisCycle) {
       pushLog(state, "fill", `fill ${fill.side.toUpperCase()} ${fill.price.toFixed(5)} × ${fill.qty.toFixed(1)}`, {
@@ -606,6 +610,8 @@ type PlaceOpts = {
   allowImpulse?: boolean;
   allowExtra?: boolean;
   holdUntilFill?: boolean;
+  /** Cap-full dump clip: reduce-only even when the sell is below entry. */
+  allowUnderwater?: boolean;
 };
 
 function gateCandidate(state: EngineState, side: Side, target: number, opts: PlaceOpts = {}): GateFail | null {
@@ -622,7 +628,7 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
   if (acc && side === "sell") {
     if (isFlat(state) || state.position.size <= 0) return { reason: "flat — no sells (no shorts)" };
     const atCap = !underBuyCap(state);
-    if (atCap && !plusPnlSell(state, target)) {
+    if (atCap && !opts.allowUnderwater && !plusPnlSell(state, target)) {
       return { reason: `buy-cap — sell only +PnL above entry ${state.position.entry.toFixed(state.config.market.priceDecimals)}` };
     }
   }
@@ -1087,22 +1093,24 @@ function lockFixedSpacing(state: EngineState) {
 
 function updateImpulse(state: EngineState, input: StepInput) {
   if (input.minuteCandle) state.minuteCandle = input.minuteCandle;
-  const minute = state.minuteCandle;
-  const resolved = resolveImpulse({
+  if (!(state.mark > 0)) return;
+  const measuredFrom =
+    state.impulse === "none"
+      ? (state.impulseAnchor ?? fillAnchor(state) ?? state.mark)
+      : (state.impulseOrigin ?? state.impulseAnchor ?? fillAnchor(state) ?? state.mark);
+  const resolved = excursionImpulse({
     prev: state.impulse,
-    history: state.markHistory,
     mark: state.mark,
-    now: state.now,
-    minuteOpen: minute?.o ?? null,
-    minuteClose: minute?.c ?? null,
-    triggerPct: state.config.market.impulseTriggerPct,
-    coolPct: state.config.market.impulseCoolPct,
-    windowMs: state.config.market.impulseWindowMs,
+    anchor: measuredFrom,
+    extreme: state.impulseExtreme,
+    trigger: state.config.market.impulseTriggerPct,
+    cool: state.config.market.impulseCoolPct,
   });
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
       state.impulseJustCooled = true;
       state.impulseCooledFrom = state.impulse;
+      state.impulseAnchor = state.mark;
       if (isAccumulate(state)) {
         pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch missed rungs then ±1`);
       } else {
@@ -1119,8 +1127,8 @@ function updateImpulse(state: EngineState, input: StepInput) {
         `impulse flip ${from}→${resolved.impulse} — ${side} the finished impulse size now (Δ ${resolved.deltaPct.toFixed(3)}%)`,
       );
     } else {
-      state.impulseOrigin = fillAnchor(state) ?? (state.mark > 0 ? state.mark : null);
-      state.impulseExtreme = state.mark > 0 ? state.mark : state.impulseOrigin;
+      state.impulseOrigin = measuredFrom;
+      state.impulseExtreme = state.mark;
       if (state.config.armed) cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
       if (isAccumulate(state) && resolved.impulse === "buy") {
         pushLog(
@@ -1233,6 +1241,94 @@ export function resetSession(state: EngineState): EngineState {
   return next;
 }
 
+function reliefStillOpen(state: EngineState): boolean {
+  const relief = state.relief;
+  if (!relief) return false;
+  return state.orders.some(
+    (o) => o.side === "sell" && (isHoldOrder(o) || isMineOrder(o)) && sameRung(o.price, relief.price, state.factor),
+  );
+}
+
+function pullReliefQty(state: EngineState): number {
+  const relief = state.relief;
+  if (!relief) return 0;
+  const sold = Math.max(0, relief.baselinePos - state.position.size);
+  const qty = roundQty(Math.min(relief.qty, sold), state.config.market.sizeDecimals);
+  state.relief = null;
+  return qty > 0 ? qty : 0;
+}
+
+function placeRecuperate(state: EngineState, qty: number) {
+  const m = state.config.market;
+  const mid = roundPrice(state.mark, m.priceDecimals);
+  const clip = roundQty(qty, m.sizeDecimals);
+  if (!(clip > 0) || !meetsExchangeMins(state, clip, mid)) {
+    pushLog(state, "impulse", "cap-relief filled but recuperate skipped — qty below min");
+    return;
+  }
+  if (
+    !placeLimit(state, "buy", mid, "recuperate cap-relief", {
+      qty: clip,
+      allowExtra: true,
+      allowImpulse: true,
+      holdUntilFill: true,
+    })
+  ) {
+    pushLog(state, "impulse", "cap-relief recuperate not placed");
+    return;
+  }
+  state.lastFillPrice = mid;
+  state.lastFillSide = "buy";
+  state.lastFillAt = state.now;
+  state.impulseAnchor = mid;
+  pushLog(
+    state,
+    "place",
+    `recuperate BUY ${mid.toFixed(m.priceDecimals)} × ${clip.toFixed(m.sizeDecimals)} — same clip sold on the dump`,
+    { side: "buy", price: mid, qty: clip, hold: true },
+  );
+}
+
+function maybePlaceCapRelief(state: EngineState) {
+  if (!state.config.armed || !isAccumulate(state) || state.impulse !== "sell") return;
+  if (state.position.size <= 0) return;
+  if (state.relief) {
+    const sold = state.relief.baselinePos - state.position.size;
+    if (!reliefStillOpen(state) && sold <= 1e-12) state.relief = null;
+    else return;
+  }
+  if (underBuyCap(state)) return;
+  const m = state.config.market;
+  const price = roundPrice(state.mark, m.priceDecimals);
+  let qty = baseQty(price, state.config.orderNotional, m.sizeDecimals);
+  qty = liftQtyToMins(state, qty, price);
+  qty = roundQty(Math.min(qty, state.position.size), m.sizeDecimals);
+  if (!meetsExchangeMins(state, qty, price)) {
+    pushLog(state, "impulse", "cap-relief skip — 1× ticket below Lighter min");
+    return;
+  }
+  const baseline = state.position.size;
+  if (
+    !placeLimit(state, "sell", price, "cap-relief 1× ticket", {
+      qty,
+      reduceOnly: true,
+      allowExtra: true,
+      allowImpulse: true,
+      holdUntilFill: true,
+      allowUnderwater: true,
+    })
+  ) {
+    return;
+  }
+  const placed = state.orders[state.orders.length - 1];
+  state.relief = { qty: placed?.qty ?? qty, baselinePos: baseline, price };
+  pushLog(
+    state,
+    "impulse",
+    `cap-relief SELL ${price.toFixed(m.priceDecimals)} × ${(placed?.qty ?? qty).toFixed(m.sizeDecimals)} — 1× $${state.config.orderNotional} reduce-only, buy this qty back on cool/flip`,
+  );
+}
+
 function impulseCoolCatch(state: EngineState): void {
   const flipping = state.impulseFlipCatch;
   if (!state.impulseJustCooled && !flipping) return;
@@ -1240,6 +1336,7 @@ function impulseCoolCatch(state: EngineState): void {
   state.impulseFlipCatch = false;
   const cooledFrom = state.impulseCooledFrom;
   state.impulseCooledFrom = null;
+  const recuperateQty = pullReliefQty(state);
   const origin = state.impulseOrigin ?? fillAnchor(state);
   const extreme = state.impulseExtreme ?? state.mark;
   state.impulseOrigin = null;
@@ -1249,6 +1346,12 @@ function impulseCoolCatch(state: EngineState): void {
     state.impulseOrigin = state.mark;
     state.impulseExtreme = state.mark;
   };
+  if (recuperateQty > 0 && state.config.armed && state.mark > 0) {
+    cancelBotLeftovers(state, flipping ? "impulse flip leftovers" : "impulse cool leftovers");
+    placeRecuperate(state, recuperateQty);
+    armNext();
+    return;
+  }
   if (!origin || state.mark <= 0 || !state.config.armed) {
     armNext();
     return;
@@ -1411,6 +1514,8 @@ function runArmedCycle(state: EngineState) {
   } else if (anchor) {
     cleanInvalid(state);
   }
+
+  if (state.impulse === "sell") maybePlaceCapRelief(state);
 
   if (!catching) {
     if (state.accountSource !== "live") {

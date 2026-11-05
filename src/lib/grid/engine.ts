@@ -97,7 +97,8 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     cancelledIds: [],
     impulseJustCooled: false,
     impulseCooledFrom: null,
-    impulseFlipCatch: false,
+    impulseArmNext: null,
+    impulseTurn: null,
     impulseOrigin: null,
     impulseExtreme: null,
     impulseAnchor: null,
@@ -1108,47 +1109,37 @@ function updateImpulse(state: EngineState, input: StepInput) {
   });
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
+      const finished = state.impulse === "sell" ? "DOWN" : state.impulse === "buy" ? "UP" : "FLAT";
+      const trig = state.config.market.impulseTriggerPct;
+      const opposite = state.impulse === "sell" ? "buy" : state.impulse === "buy" ? "sell" : null;
       state.impulseJustCooled = true;
       state.impulseCooledFrom = state.impulse;
       state.impulseAnchor = state.mark;
-      if (isAccumulate(state)) {
-        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch missed rungs then ±1`);
-      } else {
-        pushLog(state, "impulse", `impulse cool |Δ| ${resolved.deltaPct.toFixed(3)}% — catch then current ±1`);
-      }
-    } else if (state.impulse === "buy" || state.impulse === "sell") {
-      state.impulseFlipCatch = true;
-      state.impulseCooledFrom = state.impulse;
-      const from = state.impulse;
-      const side = from === "sell" ? "BUY" : "SELL";
+      state.impulseTurn = state.impulseExtreme;
+      state.impulseArmNext = opposite && resolved.retracePct >= trig ? opposite : null;
+      const next =
+        state.impulseArmNext === "buy"
+          ? ` — reversal ${resolved.retracePct.toFixed(2)}% starts UP after this cool, no second bunch`
+          : state.impulseArmNext === "sell"
+            ? ` — reversal ${resolved.retracePct.toFixed(2)}% starts DOWN after this cool, no second bunch`
+            : ` — correction under ${trig}%, back to idle ±1`;
       pushLog(
         state,
         "impulse",
-        `impulse flip ${from}→${resolved.impulse} — ${side} the finished impulse size now (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        `${finished} impulse cool retrace ${resolved.retracePct.toFixed(3)}% — one bunch for this leg only${next}`,
       );
     } else {
+      const dir = resolved.impulse === "sell" ? "DOWN" : "UP";
       state.impulseOrigin = measuredFrom;
       state.impulseExtreme = state.mark;
+      state.impulseArmNext = null;
+      state.impulseTurn = null;
       if (state.config.armed) cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
-      if (isAccumulate(state) && resolved.impulse === "buy") {
-        pushLog(
-          state,
-          "impulse",
-          `impulse BUY — leftovers cleared, one reduce-only harvest, no new buys (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-        );
-      } else if (isAccumulate(state) && resolved.impulse === "sell") {
-        pushLog(
-          state,
-          "impulse",
-          `impulse SELL — leftovers cleared, freeze ±1 until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-        );
-      } else {
-        pushLog(
-          state,
-          "impulse",
-          `impulse ${resolved.impulse.toUpperCase()} — leftovers cleared, freeze until cool (Δ ${resolved.deltaPct.toFixed(3)}%)`,
-        );
-      }
+      pushLog(
+        state,
+        "impulse",
+        `${dir} impulse start — one direction, no bunch until a ${state.config.market.impulseCoolPct}% correction (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+      );
     }
   } else if (state.mark > 0 && (state.impulse === "buy" || state.impulse === "sell")) {
     if (state.impulseExtreme == null) state.impulseExtreme = state.mark;
@@ -1329,11 +1320,30 @@ function maybePlaceCapRelief(state: EngineState) {
   );
 }
 
+function armOppositeAfterCool(state: EngineState) {
+  const next = state.impulseArmNext;
+  if (next !== "buy" && next !== "sell") return;
+  state.impulseArmNext = null;
+  const turn = state.impulseTurn;
+  state.impulseTurn = null;
+  if (state.impulse !== "none" || !(state.mark > 0)) return;
+  const m = state.config.market;
+  state.impulse = next;
+  state.impulseOrigin = turn != null && turn > 0 ? turn : state.mark;
+  state.impulseExtreme = state.mark;
+  state.impulseAnchor = null;
+  const dir = next === "buy" ? "UP" : "DOWN";
+  const pct = state.impulseOrigin > 0 ? ((state.mark - state.impulseOrigin) / state.impulseOrigin) * 100 : 0;
+  pushLog(
+    state,
+    "impulse",
+    `${dir} impulse start after cool — reversal ${pct.toFixed(2)}% from ${state.impulseOrigin.toFixed(m.priceDecimals)}, no bunch until this leg corrects ${m.impulseCoolPct}%`,
+  );
+}
+
 function impulseCoolCatch(state: EngineState): void {
-  const flipping = state.impulseFlipCatch;
-  if (!state.impulseJustCooled && !flipping) return;
+  if (!state.impulseJustCooled) return;
   state.impulseJustCooled = false;
-  state.impulseFlipCatch = false;
   const cooledFrom = state.impulseCooledFrom;
   state.impulseCooledFrom = null;
   const recuperateQty = pullReliefQty(state);
@@ -1341,19 +1351,12 @@ function impulseCoolCatch(state: EngineState): void {
   const extreme = state.impulseExtreme ?? state.mark;
   state.impulseOrigin = null;
   state.impulseExtreme = null;
-  const armNext = () => {
-    if (!flipping || state.impulse === "none" || state.mark <= 0) return;
-    state.impulseOrigin = state.mark;
-    state.impulseExtreme = state.mark;
-  };
   if (recuperateQty > 0 && state.config.armed && state.mark > 0) {
-    cancelBotLeftovers(state, flipping ? "impulse flip leftovers" : "impulse cool leftovers");
+    cancelBotLeftovers(state, "impulse cool leftovers");
     placeRecuperate(state, recuperateQty);
-    armNext();
     return;
   }
   if (!origin || state.mark <= 0 || !state.config.armed) {
-    armNext();
     return;
   }
   const acc = isAccumulate(state);
@@ -1364,40 +1367,35 @@ function impulseCoolCatch(state: EngineState): void {
   const nextDown = downLevel(origin, state.factor, m.priceDecimals);
   const nextUp = upLevel(origin, state.factor, m.priceDecimals);
   const far = extreme <= nextDown + 1e-12 || extreme >= nextUp - 1e-12;
-  cancelBotLeftovers(state, flipping ? "impulse flip leftovers" : "impulse cool leftovers");
-  const tag = flipping ? "flip" : "cool";
+  cancelBotLeftovers(state, "impulse cool leftovers");
+  const tag = "cool";
   if (!far) {
     pushLog(
       state,
       "impulse",
       `impulse ${tag} near ${rawSteps.toFixed(2)} step Δ ${distPct.toFixed(2)}% from ${origin.toFixed(m.priceDecimals)} — leftovers cleared, ±1 around last fill`,
     );
-    armNext();
-    return;
+        return;
   }
   const mid = roundPrice(state.mark, m.priceDecimals);
   const side: Side = cooledFrom === "sell" ? "buy" : cooledFrom === "buy" ? "sell" : state.mark > origin ? "sell" : "buy";
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse ${tag} far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
-    armNext();
-    return;
+        return;
   }
   if (acc && side === "buy" && !underBuyCap(state)) {
     pushLog(state, "impulse", `impulse ${tag} far buy skipped — buy cap, continue ±1`);
-    armNext();
-    return;
+        return;
   }
   if (acc && side === "sell" && (isFlat(state) || state.position.size <= 0)) {
     pushLog(state, "impulse", `impulse ${tag} far sell skipped — no shorts, continue ±1`);
-    armNext();
-    return;
+        return;
   }
   const nLevels = Math.max(1, Math.min(BUNCH_CAP_LEVELS, Math.round(rawSteps) || 1));
   const oneUsd = acc && side === "sell" ? sellTicketUsd(state, state.mark) : state.config.orderNotional;
   const one = baseQty(state.mark, oneUsd, m.sizeDecimals);
   if (one <= 0) {
-    armNext();
-    return;
+        return;
   }
   const reducing = (state.position.size < 0 && side === "buy") || (state.position.size > 0 && side === "sell");
   let qty = roundQty(one * nLevels, m.sizeDecimals);
@@ -1413,8 +1411,7 @@ function impulseCoolCatch(state: EngineState): void {
         "impulse",
         `impulse ${tag} not enough size to bunch and keep 1 lvl (${pos.toFixed(m.sizeDecimals)}) — continue as is`,
       );
-      armNext();
-      return;
+            return;
     }
     qty = roundQty(Math.min(qty, available), m.sizeDecimals);
     reduceOnly = true;
@@ -1429,26 +1426,22 @@ function impulseCoolCatch(state: EngineState): void {
     const available = roundQty(remainingQty - leaveQty, m.sizeDecimals);
     if (available + 1e-12 < one) {
       pushLog(state, "impulse", `impulse ${tag} not enough room for 1 lvl bunch — continue as is`);
-      armNext();
-      return;
+            return;
     }
     qty = roundQty(Math.min(qty, available), m.sizeDecimals);
   }
   if (qty <= 0) {
     pushLog(state, "impulse", "impulse bunch skipped — no size, continue as is");
-    armNext();
-    return;
+        return;
   }
   qty = liftQtyToMins(state, qty, state.mark);
   if (reduceOnly && qty > Math.abs(state.position.size) - one + 1e-12) {
     pushLog(state, "impulse", "impulse bunch not enough to reduce after min clip — continue as is");
-    armNext();
-    return;
+        return;
   }
   if (!meetsExchangeMins(state, qty, state.mark)) {
     pushLog(state, "impulse", "impulse bunch skip — qty below Lighter min, continue as is");
-    armNext();
-    return;
+        return;
   }
   const why = `impulse-${tag} bunch ${nLevels} lvl @ mid`;
   if (
@@ -1461,8 +1454,7 @@ function impulseCoolCatch(state: EngineState): void {
     })
   ) {
     pushLog(state, "impulse", `impulse ${tag} bunch not placed — continue as is`);
-    armNext();
-    return;
+        return;
   }
   state.lastFillPrice = mid;
   state.lastFillSide = side;
@@ -1488,8 +1480,7 @@ function impulseCoolCatch(state: EngineState): void {
       });
     }
   }
-  armNext();
-}
+  }
 
 function runArmedCycle(state: EngineState) {
   applyUnderweightMark(state);
@@ -1497,7 +1488,7 @@ function runArmedCycle(state: EngineState) {
   const anchor = fillAnchor(state);
   const steps = state.config.market.adverseSteps;
   let waitFill = false;
-  const catching = state.impulseJustCooled || state.impulseFlipCatch;
+  const catching = state.impulseJustCooled;
   if (catching) {
     impulseCoolCatch(state);
   } else if (state.impulse !== "none") {
@@ -1533,7 +1524,7 @@ function runArmedCycle(state: EngineState) {
     }
   }
 
-  if (!waitFill) maintainPair(state, "maintain ±1");
+  if (!waitFill && !state.impulseArmNext) maintainPair(state, "maintain ±1");
 }
 
 export function step(state: EngineState, input: StepInput): EngineState {
@@ -1555,6 +1546,7 @@ export function step(state: EngineState, input: StepInput): EngineState {
   updateImpulse(state, input);
 
   if (state.config.armed) runArmedCycle(state);
+  armOppositeAfterCool(state);
 
   updateCadence(state);
   return state;

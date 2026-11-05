@@ -124,8 +124,10 @@ export type EngineState = {
   cancelledIds: string[];
   impulseJustCooled: boolean;
   impulseCooledFrom: Impulse | null;
-  /** True when buy↔sell flipped without cooling — bunch the finished impulse immediately. */
-  impulseFlipCatch: boolean;
+  /** Set on a cool whose retrace is already a full opposite impulse. Armed after the cool bunch, no second bunch. */
+  impulseArmNext: "buy" | "sell" | null;
+  /** Extreme of the leg that just cooled. Origin of the opposite impulse. */
+  impulseTurn: number | null;
   /** lastFill (or mark) when the current impulse started. */
   impulseOrigin: number | null;
   /** Furthest mark in the impulse direction. Bunch size uses this, not the bounce. */

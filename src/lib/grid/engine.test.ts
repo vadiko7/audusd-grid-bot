@@ -134,8 +134,10 @@ describe("impulse", () => {
     assert.equal(still.impulse, "sell");
     const cool = excursionImpulse({ prev: "sell", mark: 2433, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
     assert.equal(cool.impulse, "none");
-    const flip = excursionImpulse({ prev: "sell", mark: 2460, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
-    assert.equal(flip.impulse, "buy");
+    assert.ok(cool.retracePct >= 0.4 && cool.retracePct < 1.25);
+    const reversal = excursionImpulse({ prev: "sell", mark: 2460, anchor: 2640, extreme: 2423, trigger: 1.25, cool: 0.4 });
+    assert.equal(reversal.impulse, "none", "a large bounce still cools — it does not skip cool");
+    assert.ok(reversal.retracePct >= 1.25);
   });
 });
 
@@ -952,7 +954,7 @@ describe("engine cycle", () => {
     s.actions = [];
     run(s, 0.7 * 1.0035, t0 + 16_000 + 50_000);
     assert.equal(s.impulse, "buy");
-    assert.ok(s.logs.some((l) => l.level === "impulse" && l.message.includes("freeze")));
+    assert.ok(s.logs.some((l) => l.level === "impulse" && l.message.includes("UP impulse start") && l.message.includes("no bunch until")));
     assert.equal(s.orders.length, 0);
   });
 
@@ -1279,7 +1281,7 @@ describe("SPCX accumulate", () => {
     assert.equal(s.orders.filter((o) => o.side === "sell" && o.mine !== false).length, 1, "harvest must not stack a new sell every cycle");
   });
 
-  it("buy→sell impulse flip cancels harvest leftovers and does not add ±1", () => {
+  it("UP cool on a hard reversal sells that leg once, then starts DOWN with no second bunch", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     s.lastFillPrice = 140;
     s.lastFillAt = 1;
@@ -1313,10 +1315,14 @@ describe("SPCX accumulate", () => {
     assert.equal(s.impulse, "sell");
     assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === harvestId));
     assert.ok(!s.orders.some((o) => o.id === harvestId));
-    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"), "no buy bunch on the reversal — the UP leg sells");
+    const sellBunch = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
+    assert.equal(sellBunch.length, 1, "one cool bunch, not a flip bunch plus a cool bunch");
+    assert.ok(s.logs.some((l) => l.message.includes("UP impulse cool")));
+    assert.ok(s.logs.some((l) => l.message.includes("DOWN impulse start after cool")));
   });
 
-  it("sell→buy flip buys the dump size at the bounce and sells above it", () => {
+  it("DOWN cool on a hard reversal buys that dump once, then starts UP with no second bunch", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     s.lastFillPrice = 140;
     s.lastFillAt = 1;
@@ -1348,12 +1354,15 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
-    const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
-    assert.ok(bunch, "buy the finished dump immediately");
+    const buys = s.orders.filter((o) => o.holdUntilFill && o.side === "buy");
+    assert.equal(buys.length, 1, "one cool bunch for the finished DOWN leg");
+    const bunch = buys[0]!;
     assert.ok(Math.abs(bunch.price - 142) < 0.05);
     const one = baseQty(142, 25, SPCX.sizeDecimals);
     assert.ok(bunch.qty + 1e-9 >= one * 2, "qty follows the dump, not the bounce");
-    assert.ok(s.orders.some((o) => o.side === "sell" && o.price > bunch.price), "sell sits above the buy");
+    assert.ok(s.orders.some((o) => o.side === "sell" && o.price > bunch.price), "one reduce sell above that buy, not a second bunch");
+    assert.ok(s.logs.some((l) => l.message.includes("DOWN impulse cool")));
+    assert.ok(s.logs.some((l) => l.message.includes("UP impulse start after cool")));
   });
 
   it("dump cool uses the same leftovers → bunch → ±1 path", () => {

@@ -1425,9 +1425,9 @@ describe("SPCX accumulate", () => {
     });
     step(s, { now: t0 + 50_000, mark: dumped, live });
     assert.equal(s.impulse, "sell");
-    const bounced = roundPrice(dumped * 1.0086, NATGAS.priceDecimals);
+    const bounced = roundPrice(dumped * 1.0055, NATGAS.priceDecimals);
     step(s, { now: t0 + 52_000, mark: bounced, live });
-    assert.equal(s.impulse, "none", "0.86% bounce cools the leg without starting UP");
+    assert.equal(s.impulse, "none", "0.55% bounce cools NATGAS (cool 0.5%) without starting UP");
     const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
     assert.ok(bunch, "1 missed rung must bunch");
     assert.ok(Math.abs(bunch.price - bounced) < 0.02);

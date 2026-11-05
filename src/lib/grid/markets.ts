@@ -29,7 +29,7 @@ export type MarketProfile = {
   regimeHigh: number;
   regimeExtreme: number;
   impulseTriggerPct: number;
-  /** End the leg on a retrace of 70% of one rung, measured from the extreme. */
+  /** End the leg on a retrace from the extreme. Most books: 70% of one rung. NATGAS is 0.5%. */
   impulseCoolPct: number;
   impulseWindowMs: number;
   proximityMult: number;
@@ -115,7 +115,7 @@ export const NATGAS: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 0.9,
-  impulseCoolPct: 0.85,
+  impulseCoolPct: 0.5,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.875,

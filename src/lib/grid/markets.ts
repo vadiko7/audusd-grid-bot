@@ -115,7 +115,7 @@ export const NATGAS: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 0.9,
-  impulseCoolPct: 1.05,
+  impulseCoolPct: 0.85,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.875,

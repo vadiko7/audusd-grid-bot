@@ -132,6 +132,9 @@ export type EngineState = {
   impulseOrigin: number | null;
   /** Furthest mark in the impulse direction. Bunch size uses this, not the bounce. */
   impulseExtreme: number | null;
+  /** First price of this direction. Later continuation bunches still measure from here. */
+  campaignOrigin: number | null;
+  campaignSide: "buy" | "sell" | null;
   /** While flat impulse: measure the next leg from here instead of the stale last fill. */
   impulseAnchor: number | null;
   /** One-ticket reduce-only sell placed because the buy cap blocked a dump buy. */

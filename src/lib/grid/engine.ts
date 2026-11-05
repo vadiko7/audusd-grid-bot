@@ -101,6 +101,8 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     impulseTurn: null,
     impulseOrigin: null,
     impulseExtreme: null,
+    campaignOrigin: null,
+    campaignSide: null,
     impulseAnchor: null,
     relief: null,
     foreignMargin: 0,
@@ -833,12 +835,13 @@ function isMineOrder(order: GridOrder): boolean {
 
 function cancelBotLeftovers(state: EngineState, reason: string) {
   cancelAll(state, reason);
-  state.orders = state.orders.filter((o) => !isMineOrder(o));
-  state.holdIds = [];
+  state.orders = state.orders.filter((o) => !isMineOrder(o) || isHoldOrder(o));
+  const live = new Set(state.orders.map((o) => o.id));
+  state.holdIds = state.holdIds.filter((id) => live.has(id));
 }
 
 function cancelAll(state: EngineState, reason: string) {
-  const force = /disarm|flatten|impulse/i.test(reason);
+  const force = /disarm|flatten/i.test(reason);
   const mine = state.orders.filter((o) => isMineOrder(o) && (force || !isHoldOrder(o)));
   if (mine.length === 0) {
     state.lastCleanReason = reason;
@@ -852,7 +855,7 @@ function cancelAll(state: EngineState, reason: string) {
 
 function dropOrder(state: EngineState, order: GridOrder, why: string) {
   if (!isMineOrder(order)) return;
-  if (isHoldOrder(order) && !/disarm|flatten|impulse/i.test(why)) {
+  if (isHoldOrder(order) && !/disarm|flatten/i.test(why)) {
     pushLog(state, "info", `hold ${order.side.toUpperCase()} ${order.price.toFixed(state.config.market.priceDecimals)} — leave until fill (${why})`);
     return;
   }
@@ -1092,6 +1095,16 @@ function lockFixedSpacing(state: EngineState) {
   if (state.regime !== "normal") state.regime = "normal";
 }
 
+function rememberCampaign(state: EngineState, side: "buy" | "sell", freshOrigin: number, mark: number): boolean {
+  const same = state.campaignSide === side && state.campaignOrigin != null && state.campaignOrigin > 0;
+  if (!same) {
+    state.campaignSide = side;
+    state.campaignOrigin = freshOrigin;
+  }
+  state.campaignExtreme = mark;
+  return same;
+}
+
 function updateImpulse(state: EngineState, input: StepInput) {
   if (input.minuteCandle) state.minuteCandle = input.minuteCandle;
   if (!(state.mark > 0)) return;
@@ -1099,7 +1112,7 @@ function updateImpulse(state: EngineState, input: StepInput) {
     state.impulse === "none"
       ? (state.impulseAnchor ?? fillAnchor(state) ?? state.mark)
       : (state.impulseOrigin ?? state.impulseAnchor ?? fillAnchor(state) ?? state.mark);
-  const resolved = excursionImpulse({
+  const resolvedRaw = excursionImpulse({
     prev: state.impulse,
     mark: state.mark,
     anchor: measuredFrom,
@@ -1107,6 +1120,25 @@ function updateImpulse(state: EngineState, input: StepInput) {
     trigger: state.config.market.impulseTriggerPct,
     cool: state.config.market.impulseCoolPct,
   });
+  let resolved = resolvedRaw;
+  if (
+    state.impulse === "none" &&
+    resolved.impulse === "none" &&
+    state.campaignSide &&
+    state.campaignOrigin != null &&
+    state.campaignExtreme != null &&
+    state.mark > 0
+  ) {
+    const extended =
+      state.campaignSide === "sell" ? state.mark < state.campaignExtreme : state.mark > state.campaignExtreme;
+    if (extended) {
+      resolved = {
+        impulse: state.campaignSide,
+        deltaPct: ((state.mark - state.campaignOrigin) / state.campaignOrigin) * 100,
+        retracePct: 0,
+      };
+    }
+  }
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
       const finished = state.impulse === "sell" ? "DOWN" : state.impulse === "buy" ? "UP" : "FLAT";
@@ -1130,21 +1162,26 @@ function updateImpulse(state: EngineState, input: StepInput) {
       );
     } else {
       const dir = resolved.impulse === "sell" ? "DOWN" : "UP";
-      state.impulseOrigin = measuredFrom;
+      const continued = rememberCampaign(state, resolved.impulse, measuredFrom, state.mark);
+      state.impulseOrigin = state.campaignOrigin ?? measuredFrom;
       state.impulseExtreme = state.mark;
       state.impulseArmNext = null;
       state.impulseTurn = null;
       if (state.config.armed) cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
+      const startPx = (state.campaignOrigin ?? measuredFrom).toFixed(state.config.market.priceDecimals);
       pushLog(
         state,
         "impulse",
-        `${dir} impulse start — one direction, no bunch until a ${state.config.market.impulseCoolPct}% correction (Δ ${resolved.deltaPct.toFixed(3)}%)`,
+        continued
+          ? `${dir} impulse continue — bunch still from first start ${startPx}, resting bunches kept (Δ ${resolved.deltaPct.toFixed(3)}%)`
+          : `${dir} impulse start — one direction, no bunch until a ${state.config.market.impulseCoolPct}% correction (Δ ${resolved.deltaPct.toFixed(3)}%)`,
       );
     }
   } else if (state.mark > 0 && (state.impulse === "buy" || state.impulse === "sell")) {
     if (state.impulseExtreme == null) state.impulseExtreme = state.mark;
     state.impulseExtreme =
       state.impulse === "buy" ? Math.max(state.impulseExtreme, state.mark) : Math.min(state.impulseExtreme, state.mark);
+    state.campaignExtreme = state.impulseExtreme;
   }
   state.impulse = resolved.impulse;
   state.impulseDeltaPct = resolved.deltaPct;
@@ -1329,7 +1366,8 @@ function armOppositeAfterCool(state: EngineState) {
   if (state.impulse !== "none" || !(state.mark > 0)) return;
   const m = state.config.market;
   state.impulse = next;
-  state.impulseOrigin = turn != null && turn > 0 ? turn : state.mark;
+  rememberCampaign(state, next, turn != null && turn > 0 ? turn : state.mark, state.mark);
+  state.impulseOrigin = state.campaignOrigin;
   state.impulseExtreme = state.mark;
   state.impulseAnchor = null;
   const dir = next === "buy" ? "UP" : "DOWN";
@@ -1347,8 +1385,8 @@ function impulseCoolCatch(state: EngineState): void {
   const cooledFrom = state.impulseCooledFrom;
   state.impulseCooledFrom = null;
   const recuperateQty = pullReliefQty(state);
-  const origin = state.impulseOrigin ?? fillAnchor(state);
-  const extreme = state.impulseExtreme ?? state.mark;
+  const origin = state.campaignOrigin ?? state.impulseOrigin ?? fillAnchor(state);
+  const extreme = state.impulseExtreme ?? state.campaignExtreme ?? state.mark;
   state.impulseOrigin = null;
   state.impulseExtreme = null;
   if (recuperateQty > 0 && state.config.armed && state.mark > 0) {

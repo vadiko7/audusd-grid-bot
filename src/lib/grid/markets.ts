@@ -29,6 +29,7 @@ export type MarketProfile = {
   regimeHigh: number;
   regimeExtreme: number;
   impulseTriggerPct: number;
+  /** End the leg on a retrace of 70% of one rung, measured from the extreme. */
   impulseCoolPct: number;
   impulseWindowMs: number;
   proximityMult: number;
@@ -80,7 +81,7 @@ export const AUDUSD: MarketProfile = {
   regimeHigh: 0.8,
   regimeExtreme: 1.2,
   impulseTriggerPct: 0.28,
-  impulseCoolPct: 0.1,
+  impulseCoolPct: 0.07,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 0.125,
@@ -114,7 +115,7 @@ export const NATGAS: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 0.9,
-  impulseCoolPct: 0.3,
+  impulseCoolPct: 1.05,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.875,
@@ -156,7 +157,7 @@ export const SPCX: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 1.75,
-  impulseCoolPct: 0.5,
+  impulseCoolPct: 0.7,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.25,
@@ -196,7 +197,7 @@ export const TSLA: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 1.25,
-  impulseCoolPct: 0.4,
+  impulseCoolPct: 0.525,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 0.9375,
@@ -238,7 +239,7 @@ export const ETH: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 1.25,
-  impulseCoolPct: 0.4,
+  impulseCoolPct: 0.56,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.0,
@@ -280,7 +281,7 @@ export const GEV: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 1.25,
-  impulseCoolPct: 0.4,
+  impulseCoolPct: 0.56,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 1.0,
@@ -322,7 +323,7 @@ export const XAU: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 0.65,
-  impulseCoolPct: 0.2,
+  impulseCoolPct: 0.35,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 0.625,
@@ -364,7 +365,7 @@ export const BTC: MarketProfile = {
   regimeHigh: 5.0,
   regimeExtreme: 8.0,
   impulseTriggerPct: 1.0,
-  impulseCoolPct: 0.3,
+  impulseCoolPct: 0.42,
   impulseWindowMs: 50_000,
   proximityMult: 1.25,
   proximityMinPct: 0.75,

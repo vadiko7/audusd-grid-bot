@@ -116,9 +116,9 @@ describe("regime / spacing", () => {
 });
 
 describe("impulse", () => {
-  it("triggers buy on +0.28% and cools under 0.10%", () => {
+  it("triggers buy on +0.28% and cools under 70% of a rung", () => {
     assert.equal(nextImpulse("none", 0.28), "buy");
-    assert.equal(nextImpulse("buy", 0.09), "none");
+    assert.equal(nextImpulse("buy", 0.06), "none");
     assert.equal(nextImpulse("none", -0.28), "sell");
     assert.equal(nextImpulse("sell", -0.05), "none");
   });
@@ -1386,9 +1386,9 @@ describe("SPCX accumulate", () => {
     });
     step(s, { now: t0 + 50_000, mark: 136, live });
     assert.equal(s.impulse, "sell");
-    step(s, { now: t0 + 52_000, mark: 136.8, live });
+    step(s, { now: t0 + 52_000, mark: 137, live });
     assert.equal(s.impulse, "none");
-    const mid = 136.8;
+    const mid = 137;
     assert.ok(
       s.orders.some((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - mid) < 0.05),
       "buy bunch at mid",
@@ -1425,13 +1425,51 @@ describe("SPCX accumulate", () => {
     });
     step(s, { now: t0 + 50_000, mark: dumped, live });
     assert.equal(s.impulse, "sell");
-    const bounced = roundPrice(dumped * 1.004, NATGAS.priceDecimals);
+    const bounced = roundPrice(dumped * 1.011, NATGAS.priceDecimals);
     step(s, { now: t0 + 52_000, mark: bounced, live });
-    assert.equal(s.impulse, "none");
+    assert.equal(s.impulse, "buy", "NATGAS cool is 1.05% and the trigger is 0.90%, so this bounce also starts UP");
     const bunch = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
     assert.ok(bunch, "1 missed rung must bunch");
     assert.ok(Math.abs(bunch.price - bounced) < 0.02);
     assert.equal(bunch.holdUntilFill, true);
+  });
+
+  it("continuation bunch is sized from the first start and the earlier bunch stays", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    setArmed(s, true);
+    const live = (mark: number, orders: typeof s.orders = []) =>
+      liveAccount({
+        equity: 8000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 4 * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 136, live: live(136) });
+    assert.equal(s.impulse, "sell");
+    assert.equal(s.campaignOrigin, 140);
+    step(s, { now: 12_000, mark: 137, live: live(137) });
+    assert.equal(s.impulse, "none");
+    const first = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
+    assert.ok(first);
+    first.id = "bunch-1";
+    s.holdIds = ["bunch-1"];
+    s.orders = s.orders.map((o) => (o.holdUntilFill && o.side === "buy" ? first : o));
+    step(s, { now: 20_000, mark: 134, live: live(134, [first]) });
+    assert.equal(s.impulse, "sell");
+    assert.equal(s.campaignOrigin, 140);
+    assert.ok(s.orders.some((o) => o.id === "bunch-1"), "continuation does not remove the resting bunch");
+    assert.ok(s.logs.some((l) => l.message.includes("impulse continue") && l.message.includes("140")));
+    step(s, { now: 22_000, mark: 135, live: live(135, [first]) });
+    assert.equal(s.impulse, "none");
+    const again = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && o.id !== "bunch-1");
+    assert.ok(again, "second cool adds a bunch from the first start");
+    const one = baseQty(135, 25, SPCX.sizeDecimals);
+    assert.ok(again.qty + 1e-9 >= one * 3, "size counts from 140, not from the later cool");
+    assert.ok(s.orders.some((o) => o.id === "bunch-1"));
   });
 
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {
@@ -1468,7 +1506,7 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
-    const mid = 144.1;
+    const mid = 143.9;
     step(s, {
       now: t0 + 52_000,
       mark: mid,
@@ -1480,8 +1518,7 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "none");
-    assert.ok(s.logs.some((l) => l.level === "clean" && l.message.includes("144.50")));
-    assert.ok(!s.orders.some((o) => o.id === "leftover-sell"));
+    assert.ok(s.orders.some((o) => o.id === "leftover-sell"), "a resting bunch is not removed when the leg cools");
     assert.ok(
       s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - mid) < 0.05),
       "bunch at mid after leftovers cleared",
@@ -1518,7 +1555,7 @@ describe("SPCX accumulate", () => {
     assert.ok(Math.abs(clip.qty - one) / one < 0.15, "clip is one $25 ticket, not the whole bag");
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
     const sold = clip.qty;
-    step(s, { now: 12_000, mark: 136.8, live: live(11 - sold, 136.8) });
+    step(s, { now: 12_000, mark: 137, live: live(11 - sold, 137) });
     assert.equal(s.impulse, "none");
     const back = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("recuperate"));
     assert.ok(back, "cool buys the same clip back");
@@ -1591,7 +1628,7 @@ describe("SPCX accumulate", () => {
   it("TSLA uses 0.75% factor and same accumulate cap", () => {
     assert.equal(TSLA.defaultFactor, 1.0075);
     assert.equal(TSLA.tpSteps, 1.1);
-    assert.equal(TSLA.impulseCoolPct, 0.4);
+    assert.equal(TSLA.impulseCoolPct, 0.525);
     assert.equal(TSLA.proximityMinPct, 0.9375);
     assert.equal(TSLA.proximityMult, 1.25);
     const p = 350;
@@ -1623,7 +1660,7 @@ describe("SPCX accumulate", () => {
     assert.equal(ETH.orderNotional, 25);
     assert.equal(ETH.defaultFactor, 1.008);
     assert.equal(ETH.impulseTriggerPct, 1.25);
-    assert.equal(ETH.impulseCoolPct, 0.4);
+    assert.equal(ETH.impulseCoolPct, 0.56);
     assert.equal(ETH.buyCapEquityMult, 3);
     assert.equal(ETH.proximityMinPct, 1.0);
     assert.equal(ETH.proximityMult, 1.25);
@@ -1652,7 +1689,7 @@ describe("SPCX accumulate", () => {
     assert.equal(GEV.maxLeverage, 10);
     assert.equal(GEV.orderNotional, 25);
     assert.equal(GEV.defaultFactor, 1.008);
-    assert.equal(GEV.impulseCoolPct, 0.4);
+    assert.equal(GEV.impulseCoolPct, 0.56);
     assert.equal(GEV.priceDecimals, 1);
     assert.equal(GEV.proximityMinPct, 1.0);
     const p = 953.8;
@@ -1681,7 +1718,7 @@ describe("SPCX accumulate", () => {
     assert.equal(XAU.orderNotional, 25);
     assert.equal(XAU.defaultFactor, 1.005);
     assert.equal(XAU.impulseTriggerPct, 0.65);
-    assert.equal(XAU.impulseCoolPct, 0.2);
+    assert.equal(XAU.impulseCoolPct, 0.35);
     assert.equal(XAU.buyCapEquityMult, 3);
     const p = 4424.04;
     const lv = levelsFromAnchor(p, XAU, XAU.defaultFactor);
@@ -1709,7 +1746,7 @@ describe("SPCX accumulate", () => {
     assert.equal(BTC.orderNotional, 25);
     assert.equal(BTC.defaultFactor, 1.006);
     assert.equal(BTC.impulseTriggerPct, 1.0);
-    assert.equal(BTC.impulseCoolPct, 0.3);
+    assert.equal(BTC.impulseCoolPct, 0.42);
     assert.equal(BTC.priceDecimals, 1);
     const p = 78778.7;
     const lv = levelsFromAnchor(p, BTC, BTC.defaultFactor);

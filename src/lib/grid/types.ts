@@ -132,9 +132,13 @@ export type EngineState = {
   impulseOrigin: number | null;
   /** Furthest mark in the impulse direction. Bunch size uses this, not the bounce. */
   impulseExtreme: number | null;
-  /** First price of this direction. Later continuation bunches still measure from here. */
+  /** First price of this direction. The one cool bunch is measured from here. */
   campaignOrigin: number | null;
   campaignSide: "buy" | "sell" | null;
+  /** Furthest price of this direction. A new extreme before the first bunch can extend the same leg. */
+  campaignExtreme: number | null;
+  /** This direction already placed its cool bunch. Do not cool again until the other direction starts. */
+  campaignBunched: boolean;
   /** While flat impulse: measure the next leg from here instead of the stale last fill. */
   impulseAnchor: number | null;
   /** One-ticket reduce-only sell placed because the buy cap blocked a dump buy. */

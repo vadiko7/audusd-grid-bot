@@ -103,6 +103,8 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     impulseExtreme: null,
     campaignOrigin: null,
     campaignSide: null,
+    campaignExtreme: null,
+    campaignBunched: false,
     impulseAnchor: null,
     relief: null,
     foreignMargin: 0,
@@ -1100,6 +1102,7 @@ function rememberCampaign(state: EngineState, side: "buy" | "sell", freshOrigin:
   if (!same) {
     state.campaignSide = side;
     state.campaignOrigin = freshOrigin;
+    state.campaignBunched = false;
   }
   state.campaignExtreme = mark;
   return same;
@@ -1131,13 +1134,16 @@ function updateImpulse(state: EngineState, input: StepInput) {
   ) {
     const extended =
       state.campaignSide === "sell" ? state.mark < state.campaignExtreme : state.mark > state.campaignExtreme;
-    if (extended) {
+    if (extended && !state.campaignBunched) {
       resolved = {
         impulse: state.campaignSide,
         deltaPct: ((state.mark - state.campaignOrigin) / state.campaignOrigin) * 100,
         retracePct: 0,
       };
     }
+  }
+  if (state.campaignBunched && resolved.impulse !== "none" && resolved.impulse === state.campaignSide) {
+    resolved = { impulse: "none", deltaPct: resolved.deltaPct, retracePct: resolved.retracePct };
   }
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
@@ -1392,6 +1398,7 @@ function impulseCoolCatch(state: EngineState): void {
   if (recuperateQty > 0 && state.config.armed && state.mark > 0) {
     cancelBotLeftovers(state, "impulse cool leftovers");
     placeRecuperate(state, recuperateQty);
+    state.campaignBunched = true;
     return;
   }
   if (!origin || state.mark <= 0 || !state.config.armed) {
@@ -1497,6 +1504,7 @@ function impulseCoolCatch(state: EngineState): void {
   state.lastFillPrice = mid;
   state.lastFillSide = side;
   state.lastFillAt = state.now;
+  state.campaignBunched = true;
   if (acc) ratchetHighest(state, mid, `${tag} bunch placed`);
   pushLog(
     state,

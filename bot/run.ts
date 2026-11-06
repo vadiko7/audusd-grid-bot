@@ -81,6 +81,7 @@ type SavedSettings = {
       impulseAnchor?: number;
       campaignOrigin?: number;
       campaignSide?: string;
+      campaignBunched?: boolean;
       reliefQty?: number;
       reliefBaseline?: number;
       reliefPrice?: number;
@@ -269,6 +270,7 @@ function saveSettings(book: {
     impulseAnchor: number | null;
     campaignOrigin: number | null;
     campaignSide: string | null;
+    campaignBunched: boolean;
     relief: { qty: number; baselinePos: number; price: number } | null;
   };
 }) {
@@ -295,6 +297,7 @@ function saveSettings(book: {
     impulseAnchor: book.engine.impulseAnchor ?? undefined,
     campaignOrigin: book.engine.campaignOrigin ?? undefined,
     campaignSide: book.engine.campaignSide ?? undefined,
+    campaignBunched: book.engine.campaignBunched || undefined,
     reliefQty: book.engine.relief?.qty,
     reliefBaseline: book.engine.relief?.baselinePos,
     reliefPrice: book.engine.relief?.price,
@@ -387,6 +390,9 @@ function makeBook(market: MarketProfile): Book {
   if (Number.isFinite(campaignOrigin) && campaignOrigin > 0) {
     engine.campaignOrigin = campaignOrigin;
     if (savedM?.campaignSide === "buy" || savedM?.campaignSide === "sell") engine.campaignSide = savedM.campaignSide;
+  }
+  if (savedM?.campaignBunched || ((savedM?.holdOrderIds?.length ?? 0) > 0 && engine.campaignSide)) {
+    engine.campaignBunched = true;
   }
   const reliefQty = Number(savedM?.reliefQty);
   const reliefBaseline = Number(savedM?.reliefBaseline);

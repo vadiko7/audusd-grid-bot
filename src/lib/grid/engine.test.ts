@@ -1434,7 +1434,7 @@ describe("SPCX accumulate", () => {
     assert.equal(bunch.holdUntilFill, true);
   });
 
-  it("continuation bunch is sized from the first start and the earlier bunch stays", () => {
+  it("a campaign cools once — a new low does not place a second bunch", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     s.lastFillPrice = 140;
     s.lastFillAt = 1;
@@ -1459,16 +1459,18 @@ describe("SPCX accumulate", () => {
     s.holdIds = ["bunch-1"];
     s.orders = s.orders.map((o) => (o.holdUntilFill && o.side === "buy" ? first : o));
     step(s, { now: 20_000, mark: 134, live: live(134, [first]) });
-    assert.equal(s.impulse, "sell");
+    assert.equal(s.impulse, "none", "a new low does not start a second cool");
     assert.equal(s.campaignOrigin, 140);
-    assert.ok(s.orders.some((o) => o.id === "bunch-1"), "continuation does not remove the resting bunch");
-    assert.ok(s.logs.some((l) => l.message.includes("impulse continue") && l.message.includes("140")));
+    assert.equal(s.campaignBunched, true);
+    assert.ok(s.orders.some((o) => o.id === "bunch-1"), "the first cool bunch stays");
+    assert.ok(!s.logs.some((l) => l.message.includes("impulse continue")));
     step(s, { now: 22_000, mark: 135, live: live(135, [first]) });
     assert.equal(s.impulse, "none");
-    const again = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && o.id !== "bunch-1");
-    assert.ok(again, "second cool adds a bunch from the first start");
-    const one = baseQty(135, 25, SPCX.sizeDecimals);
-    assert.ok(again.qty + 1e-9 >= one * 3, "size counts from 140, not from the later cool");
+    assert.equal(
+      s.orders.filter((o) => o.holdUntilFill && o.side === "buy" && o.id !== "bunch-1").length,
+      0,
+      "no second cool bunch",
+    );
     assert.ok(s.orders.some((o) => o.id === "bunch-1"));
   });
 

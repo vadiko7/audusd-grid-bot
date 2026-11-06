@@ -1474,7 +1474,7 @@ describe("SPCX accumulate", () => {
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - 2.96) < 1e-6));
   });
 
-  it("a campaign cools once — a new low does not place a second bunch", () => {
+  it("a further low replaces the bunch with one accumulated order", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     s.lastFillPrice = 140;
     s.lastFillAt = 1;
@@ -1495,23 +1495,55 @@ describe("SPCX accumulate", () => {
     assert.equal(s.impulse, "none");
     const first = s.orders.find((o) => o.holdUntilFill && o.side === "buy");
     assert.ok(first);
+    const firstQty = first.qty;
     first.id = "bunch-1";
     s.holdIds = ["bunch-1"];
     s.orders = s.orders.map((o) => (o.holdUntilFill && o.side === "buy" ? first : o));
-    step(s, { now: 20_000, mark: 134, live: live(134, [first]) });
-    assert.equal(s.impulse, "none", "a new low does not start a second cool");
+    step(s, { now: 20_000, mark: 132, live: live(132, [first]) });
+    assert.equal(s.impulse, "sell", "a new low past the bunch continues the same campaign");
     assert.equal(s.campaignOrigin, 140);
-    assert.equal(s.campaignBunched, true);
-    assert.ok(s.orders.some((o) => o.id === "bunch-1"), "the first cool bunch stays");
-    assert.ok(!s.logs.some((l) => l.message.includes("impulse continue")));
-    step(s, { now: 22_000, mark: 135, live: live(135, [first]) });
+    assert.ok(!s.orders.some((o) => o.id === "bunch-1"), "old bunch is parked");
+    step(s, { now: 22_000, mark: 133.1, live: live(133.1) });
     assert.equal(s.impulse, "none");
-    assert.equal(
-      s.orders.filter((o) => o.holdUntilFill && o.side === "buy" && o.id !== "bunch-1").length,
-      0,
-      "no second cool bunch",
-    );
-    assert.ok(s.orders.some((o) => o.id === "bunch-1"));
+    const buys = s.orders.filter((o) => o.holdUntilFill && o.side === "buy");
+    assert.equal(buys.length, 1, "one accumulated bunch, not the old one plus a new one");
+    assert.ok(buys[0]!.qty > firstQty + 1e-9, "size covers the whole move from the first start");
+    assert.ok(buys[0]!.price < first.price, "better price than the cancelled bunch");
+  });
+
+  it("a cancelled bunch is placed back when price never reaches it", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    setArmed(s, true);
+    const parkedBuy = {
+      id: "deep-buy",
+      side: "buy" as const,
+      price: 130,
+      qty: 0.19,
+      notional: 25,
+      placedAt: 1,
+      mine: true,
+      holdUntilFill: true,
+    };
+    const live = (mark: number, orders: typeof s.orders) =>
+      liveAccount({
+        equity: 8000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 4 * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 143.5, live: live(143.5, [parkedBuy]) });
+    assert.equal(s.impulse, "buy");
+    assert.ok(s.openHolds.some((t) => t.parked && Math.abs(t.price - 130) < 1e-6), "buy below is parked");
+    step(s, { now: 12_000, mark: 142.4, live: live(142.4, []) });
+    assert.equal(s.impulse, "none");
+    const back = s.orders.find((o) => o.side === "buy" && Math.abs(o.price - 130) < 1e-6);
+    assert.ok(back, "price never reached 130 — same buy is placed back");
+    assert.equal(back.qty, 0.19);
+    assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell"), "the up-move still sells once");
   });
 
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {
@@ -1560,11 +1592,10 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "none");
-    assert.ok(s.orders.some((o) => o.id === "leftover-sell"), "a resting bunch is not removed when the leg cools");
-    assert.ok(
-      s.orders.some((o) => o.holdUntilFill && o.side === "sell" && Math.abs(o.price - mid) < 0.05),
-      "bunch at mid after leftovers cleared",
-    );
+    assert.ok(!s.orders.some((o) => o.id === "leftover-sell"), "price went past the old sell — it is replaced, not kept");
+    const replaced = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
+    assert.equal(replaced.length, 1, "one accumulated sell");
+    assert.ok(Math.abs(replaced[0]!.price - mid) < 0.05, "accumulated sell at the cool price");
     const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
     assert.ok(
       s.orders.some((o) => o.side === "buy" && Math.abs(o.price - buy) < 0.05) ||

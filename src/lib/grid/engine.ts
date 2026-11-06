@@ -846,17 +846,137 @@ function isHoldOrder(order: GridOrder): boolean {
   return order.holdUntilFill === true;
 }
 
-function rememberOpenHold(state: EngineState, order: GridOrder, reduceOnly?: boolean) {
+function rememberOpenHold(state: EngineState, order: GridOrder, reduceOnly?: boolean): OpenHold {
   const price = roundPrice(order.price, state.config.market.priceDecimals);
   const hit = state.openHolds.find((t) => t.side === order.side && sameRung(t.price, price, state.factor));
   if (hit) {
     hit.qty = order.qty;
     hit.price = price;
     if (reduceOnly) hit.reduceOnly = true;
-    return;
+    return hit;
   }
-  const ticket: OpenHold = { side: order.side, price, qty: order.qty, reduceOnly: reduceOnly || undefined, triedAt: 0 };
+  const ticket: OpenHold = {
+    side: order.side,
+    price,
+    qty: order.qty,
+    reduceOnly: reduceOnly || undefined,
+    triedAt: 0,
+  };
   state.openHolds = [...state.openHolds, ticket];
+  return ticket;
+}
+
+function wentFartherThan(side: Side, orderPrice: number, extreme: number): boolean {
+  if (!(extreme > 0) || !(orderPrice > 0)) return false;
+  if (side === "buy") return extreme < orderPrice - 1e-12;
+  return extreme > orderPrice + 1e-12;
+}
+
+function emitCancel(state: EngineState, order: GridOrder, why: string) {
+  if (order.id.startsWith("pending:")) return;
+  const sent = state.cancelSentAt[order.id] ?? 0;
+  if (sent && state.now - sent < 20_000) return;
+  if (!state.cancelledIds.includes(order.id)) state.cancelledIds.push(order.id);
+  emit(state, { type: "cancel", orderId: order.id, side: order.side, price: order.price, why });
+}
+
+function parkHold(state: EngineState, order: GridOrder, why: string) {
+  const ticket = rememberOpenHold(state, order);
+  ticket.parked = true;
+  state.orders = state.orders.filter((o) => o.id !== order.id);
+  state.holdIds = state.holdIds.filter((id) => id !== order.id);
+  emitCancel(state, order, why);
+  const px = order.price.toFixed(state.config.market.priceDecimals);
+  pushLog(state, "clean", `park ${order.side.toUpperCase()} ${px} — ${why}; reopen after cool`);
+}
+
+function parkHolds(state: EngineState, why: string) {
+  for (const order of [...state.orders]) {
+    if (!isHoldOrder(order)) continue;
+    parkHold(state, order, why);
+  }
+}
+
+function chaseParked(state: EngineState) {
+  if (state.impulse === "none") return;
+  for (const order of [...state.orders]) {
+    if (!isHoldOrder(order)) continue;
+    const ticket = state.openHolds.find(
+      (t) => t.parked && t.side === order.side && sameRung(t.price, order.price, state.factor),
+    );
+    if (!ticket) continue;
+    state.orders = state.orders.filter((o) => o.id !== order.id);
+    emitCancel(state, order, "parked bunch still on book");
+  }
+}
+
+function holdPricePassed(state: EngineState, impulse: "buy" | "sell"): boolean {
+  return state.openHolds.some((t) => {
+    if (t.parked) return false;
+    if (impulse === "sell" && t.side === "buy") return state.mark < t.price;
+    if (impulse === "buy" && t.side === "sell") return state.mark > t.price;
+    return false;
+  });
+}
+
+function resolveParkedHolds(
+  state: EngineState,
+  extreme: number,
+  allowReplace: boolean,
+): { replaced: Set<Side>; restored: Set<Side>; floorQty: Partial<Record<Side, number>> } {
+  const replaced = new Set<Side>();
+  const restored = new Set<Side>();
+  const floorQty: Partial<Record<Side, number>> = {};
+  const m = state.config.market;
+  const next: OpenHold[] = [];
+  const addFloor = (side: Side, qty: number) => {
+    floorQty[side] = (floorQty[side] ?? 0) + qty;
+  };
+  for (const ticket of state.openHolds) {
+    if (!ticket.parked) {
+      next.push(ticket);
+      continue;
+    }
+    const px = ticket.price.toFixed(m.priceDecimals);
+    if (allowReplace && wentFartherThan(ticket.side, ticket.price, extreme)) {
+      replaced.add(ticket.side);
+      addFloor(ticket.side, ticket.qty);
+      pushLog(
+        state,
+        "impulse",
+        `bunch ${ticket.side.toUpperCase()} ${px} price went farther (${extreme.toFixed(m.priceDecimals)}) — reopen accumulated size`,
+      );
+      continue;
+    }
+    ticket.parked = false;
+    ticket.triedAt = state.now;
+    restored.add(ticket.side);
+    next.push(ticket);
+    placeLimit(state, ticket.side, ticket.price, "restore bunch — price did not reach", {
+      qty: ticket.qty,
+      reduceOnly: ticket.reduceOnly,
+      allowExtra: true,
+      allowImpulse: true,
+      holdUntilFill: true,
+    });
+    pushLog(state, "impulse", `bunch ${ticket.side.toUpperCase()} ${px} price did not reach — placed back`);
+  }
+  state.openHolds = next;
+  for (const order of [...state.orders]) {
+    if (!isHoldOrder(order) || !allowReplace || !wentFartherThan(order.side, order.price, extreme)) continue;
+    replaced.add(order.side);
+    addFloor(order.side, order.qty);
+    const px = order.price.toFixed(m.priceDecimals);
+    pushLog(
+      state,
+      "impulse",
+      `bunch ${order.side.toUpperCase()} ${px} price went farther (${extreme.toFixed(m.priceDecimals)}) — reopen accumulated size`,
+    );
+    emitCancel(state, order, "price went farther than bunch");
+    state.orders = state.orders.filter((o) => o.id !== order.id);
+    forgetOpenHold(state, order);
+  }
+  return { replaced, restored, floorQty };
 }
 
 function forgetOpenHold(state: EngineState, order: GridOrder) {
@@ -870,7 +990,7 @@ function reopenMissingHolds(state: EngineState) {
   if (!state.config.armed || state.accountSource !== "live" || state.openHolds.length === 0) return;
   for (const ticket of state.openHolds) {
     const resting = state.orders.some((o) => o.side === ticket.side && sameRung(o.price, ticket.price, state.factor));
-    if (resting) continue;
+    if (resting || ticket.parked) continue;
     if (state.now - (ticket.triedAt ?? 0) < 20_000) continue;
     ticket.triedAt = state.now;
     placeLimit(state, ticket.side, ticket.price, "reopen impulse until fill", {
@@ -1195,7 +1315,8 @@ function updateImpulse(state: EngineState, input: StepInput) {
     }
   }
   if (state.campaignBunched && resolved.impulse !== "none" && resolved.impulse === state.campaignSide) {
-    resolved = { impulse: "none", deltaPct: resolved.deltaPct, retracePct: resolved.retracePct };
+    const extending = state.impulse === state.campaignSide || holdPricePassed(state, resolved.impulse);
+    if (!extending) resolved = { impulse: "none", deltaPct: resolved.deltaPct, retracePct: resolved.retracePct };
   }
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
@@ -1225,13 +1346,16 @@ function updateImpulse(state: EngineState, input: StepInput) {
       state.impulseExtreme = state.mark;
       state.impulseArmNext = null;
       state.impulseTurn = null;
-      if (state.config.armed) cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
+      if (state.config.armed) {
+        cancelBotLeftovers(state, `impulse ${resolved.impulse} start`);
+        parkHolds(state, `impulse ${resolved.impulse} start`);
+      }
       const startPx = (state.campaignOrigin ?? measuredFrom).toFixed(state.config.market.priceDecimals);
       pushLog(
         state,
         "impulse",
         continued
-          ? `${dir} impulse continue — bunch still from first start ${startPx}, resting bunches kept (Δ ${resolved.deltaPct.toFixed(3)}%)`
+          ? `${dir} impulse continue — bunch still from first start ${startPx}, parked bunches reopen after cool (Δ ${resolved.deltaPct.toFixed(3)}%)`
           : `${dir} impulse start — one direction, no bunch until a ${state.config.market.impulseCoolPct}% correction (Δ ${resolved.deltaPct.toFixed(3)}%)`,
       );
     }
@@ -1243,6 +1367,7 @@ function updateImpulse(state: EngineState, input: StepInput) {
   }
   state.impulse = resolved.impulse;
   state.impulseDeltaPct = resolved.deltaPct;
+  chaseParked(state);
 }
 
 function updateCadence(state: EngineState) {
@@ -1470,6 +1595,7 @@ function impulseCoolCatch(state: EngineState): void {
   cancelBotLeftovers(state, "impulse cool leftovers");
   const tag = "cool";
   if (!far) {
+    resolveParkedHolds(state, extreme, false);
     pushLog(
       state,
       "impulse",
@@ -1479,6 +1605,11 @@ function impulseCoolCatch(state: EngineState): void {
   }
   const mid = roundPrice(state.mark, m.priceDecimals);
   const side: Side = cooledFrom === "sell" ? "buy" : cooledFrom === "buy" ? "sell" : state.mark > origin ? "sell" : "buy";
+  const settled = resolveParkedHolds(state, extreme, true);
+  if (settled.restored.has(side) && !settled.replaced.has(side)) {
+    pushLog(state, "impulse", `impulse ${tag} — restored the bunch, price did not reach it`);
+    return;
+  }
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse ${tag} far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
         return;
@@ -1530,6 +1661,8 @@ function impulseCoolCatch(state: EngineState): void {
     }
     qty = roundQty(Math.min(qty, available), m.sizeDecimals);
   }
+  const floor = settled.floorQty[side] ?? 0;
+  if (floor > qty) qty = roundQty(floor, m.sizeDecimals);
   if (qty <= 0) {
     pushLog(state, "impulse", "impulse bunch skipped — no size, continue as is");
         return;
@@ -1584,6 +1717,22 @@ function impulseCoolCatch(state: EngineState): void {
   }
 
 function runArmedCycle(state: EngineState) {
+  if (state.impulse === "none" && !state.impulseJustCooled) {
+    for (const ticket of state.openHolds) {
+      if (!ticket.parked) continue;
+      ticket.parked = false;
+      ticket.triedAt = state.now;
+      const resting = state.orders.some((o) => o.side === ticket.side && sameRung(o.price, ticket.price, state.factor));
+      if (resting) continue;
+      placeLimit(state, ticket.side, ticket.price, "restore bunch — impulse ended", {
+        qty: ticket.qty,
+        reduceOnly: ticket.reduceOnly,
+        allowExtra: true,
+        allowImpulse: true,
+        holdUntilFill: true,
+      });
+    }
+  }
   applyUnderweightMark(state);
   const currentBias = bias(state);
   const anchor = fillAnchor(state);

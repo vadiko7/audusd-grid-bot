@@ -33,6 +33,8 @@ export type OpenHold = {
   qty: number;
   reduceOnly?: boolean;
   triedAt?: number;
+  /** Bot cancelled it. After the cool: bigger order if price went past it, otherwise the same limit. */
+  parked?: boolean;
 };
 
 export type Position = {

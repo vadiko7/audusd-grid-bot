@@ -82,7 +82,7 @@ type SavedSettings = {
       campaignOrigin?: number;
       campaignSide?: string;
       campaignBunched?: boolean;
-      open_holds?: Array<{ side?: string; price?: number; qty?: number; reduceOnly?: boolean }>;
+      open_holds?: Array<{ side?: string; price?: number; qty?: number; reduceOnly?: boolean; parked?: boolean }>;
       reliefQty?: number;
       reliefBaseline?: number;
       reliefPrice?: number;
@@ -272,7 +272,7 @@ function saveSettings(book: {
     campaignOrigin: number | null;
     campaignSide: string | null;
     campaignBunched: boolean;
-    openHolds: Array<{ side: string; price: number; qty: number; reduceOnly?: boolean }>;
+    openHolds: Array<{ side: string; price: number; qty: number; reduceOnly?: boolean; parked?: boolean }>;
     relief: { qty: number; baselinePos: number; price: number } | null;
   };
 }) {
@@ -301,7 +301,13 @@ function saveSettings(book: {
     campaignSide: book.engine.campaignSide ?? undefined,
     campaignBunched: book.engine.campaignBunched || undefined,
     open_holds: book.engine.openHolds.length
-      ? book.engine.openHolds.map((t) => ({ side: t.side, price: t.price, qty: t.qty, reduceOnly: t.reduceOnly || undefined }))
+      ? book.engine.openHolds.map((t) => ({
+          side: t.side,
+          price: t.price,
+          qty: t.qty,
+          reduceOnly: t.reduceOnly || undefined,
+          parked: t.parked || undefined,
+        }))
       : undefined,
     reliefQty: book.engine.relief?.qty,
     reliefBaseline: book.engine.relief?.baselinePos,
@@ -404,7 +410,7 @@ function makeBook(market: MarketProfile): Book {
       const price = Number(t?.price);
       const qty = Number(t?.qty);
       if ((t?.side !== "buy" && t?.side !== "sell") || !(price > 0) || !(qty > 0)) return [];
-      return [{ side: t.side, price, qty, reduceOnly: t.reduceOnly || undefined, triedAt: 0 }];
+      return [{ side: t.side, price, qty, reduceOnly: t.reduceOnly || undefined, parked: t.parked || undefined, triedAt: 0 }];
     });
   }
   const reliefQty = Number(savedM?.reliefQty);

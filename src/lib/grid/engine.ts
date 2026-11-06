@@ -919,6 +919,46 @@ function holdPricePassed(state: EngineState, impulse: "buy" | "sell"): boolean {
   });
 }
 
+function absorbCloseHold(
+  state: EngineState,
+  side: Side,
+  extreme: number,
+): { price: number; qty: number } | null {
+  const prox = proximityPct(state.spacingPct, state.config.market);
+  const m = state.config.market;
+  const hits: { price: number; qty: number }[] = [];
+  state.openHolds = state.openHolds.filter((ticket) => {
+    if (!ticket.parked || ticket.side !== side || !inProximity(extreme, ticket.price, prox)) return true;
+    hits.push({ price: ticket.price, qty: ticket.qty });
+    return false;
+  });
+  for (const order of [...state.orders]) {
+    if (!isHoldOrder(order) || order.side !== side || !inProximity(extreme, order.price, prox)) continue;
+    hits.push({ price: order.price, qty: order.qty });
+    emitCancel(state, order, "reached inside spacing of old bunch");
+    state.orders = state.orders.filter((o) => o.id !== order.id);
+    forgetOpenHold(state, order);
+  }
+  if (hits.length === 0) return null;
+  let best = hits[0]!;
+  let bestDist = Math.abs(best.price - extreme);
+  let qty = 0;
+  for (const hit of hits) {
+    qty = Math.max(qty, hit.qty);
+    const dist = Math.abs(hit.price - extreme);
+    if (dist < bestDist) {
+      best = hit;
+      bestDist = dist;
+    }
+  }
+  pushLog(
+    state,
+    "impulse",
+    `reached ${extreme.toFixed(m.priceDecimals)} inside spacing of ${side.toUpperCase()} ${best.price.toFixed(m.priceDecimals)} — one order at the old price, reached size`,
+  );
+  return { price: best.price, qty };
+}
+
 function resolveParkedHolds(
   state: EngineState,
   extreme: number,
@@ -1605,9 +1645,14 @@ function impulseCoolCatch(state: EngineState): void {
   }
   const mid = roundPrice(state.mark, m.priceDecimals);
   const side: Side = cooledFrom === "sell" ? "buy" : cooledFrom === "buy" ? "sell" : state.mark > origin ? "sell" : "buy";
+  const close = absorbCloseHold(state, side, extreme);
   const settled = resolveParkedHolds(state, extreme, true);
-  const keptUnreached = settled.restored.has(side) && !settled.replaced.has(side);
-  const bunchAt = keptUnreached ? roundPrice(extreme, m.priceDecimals) : mid;
+  const keptUnreached = !close && settled.restored.has(side) && !settled.replaced.has(side);
+  const bunchAt = close
+    ? roundPrice(close.price, m.priceDecimals)
+    : keptUnreached
+      ? roundPrice(extreme, m.priceDecimals)
+      : mid;
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse ${tag} far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
         return;
@@ -1659,7 +1704,7 @@ function impulseCoolCatch(state: EngineState): void {
     }
     qty = roundQty(Math.min(qty, available), m.sizeDecimals);
   }
-  const floor = settled.floorQty[side] ?? 0;
+  const floor = Math.max(settled.floorQty[side] ?? 0, close?.qty ?? 0);
   if (floor > qty) qty = roundQty(floor, m.sizeDecimals);
   if (qty <= 0) {
     pushLog(state, "impulse", "impulse bunch skipped — no size, continue as is");
@@ -1674,9 +1719,11 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", "impulse bunch skip — qty below Lighter min, continue as is");
         return;
   }
-  const why = keptUnreached
-    ? `impulse-${tag} bunch ${nLevels} lvl @ reached ${bunchAt.toFixed(m.priceDecimals)}`
-    : `impulse-${tag} bunch ${nLevels} lvl @ mid`;
+  const why = close
+    ? `impulse-${tag} bunch ${nLevels} lvl @ old ${bunchAt.toFixed(m.priceDecimals)} (reached inside spacing)`
+    : keptUnreached
+      ? `impulse-${tag} bunch ${nLevels} lvl @ reached ${bunchAt.toFixed(m.priceDecimals)}`
+      : `impulse-${tag} bunch ${nLevels} lvl @ mid`;
   if (
     !placeLimit(state, side, bunchAt, why, {
       qty,
@@ -1697,7 +1744,9 @@ function impulseCoolCatch(state: EngineState): void {
   pushLog(
     state,
     "place",
-    keptUnreached
+    close
+      ? `impulse ${tag} LIMIT ${side.toUpperCase()} ${bunchAt.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ old price · reached inside spacing · ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)}`
+      : keptUnreached
       ? `impulse ${tag} LIMIT ${side.toUpperCase()} ${bunchAt.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ reached · old order put back · ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)}`
       : `impulse ${tag} LIMIT ${side.toUpperCase()} ${bunchAt.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} step impulse ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)} · hold until fill`,
     { side, price: bunchAt, qty, exec: "limit", n: nLevels, distPct, steps: rawSteps, origin, extreme, hold: true },

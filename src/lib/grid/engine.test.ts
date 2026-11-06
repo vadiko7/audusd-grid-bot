@@ -1581,6 +1581,40 @@ describe("SPCX accumulate", () => {
     assert.ok(Math.abs(reached.price - back.price) > 1, "the new bunch is not the old order");
   });
 
+  it("a reach inside the old bunch spacing is one order at the old price, reached size", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    setArmed(s, true);
+    const near = {
+      id: "near-buy",
+      side: "buy" as const,
+      price: 136,
+      qty: 0.19,
+      notional: 25,
+      placedAt: 1,
+      mine: true,
+      holdUntilFill: true,
+    };
+    const live = (mark: number, orders: typeof s.orders) =>
+      liveAccount({
+        equity: 8000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 4 * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 136.8, live: live(136.8, [near]) });
+    assert.equal(s.impulse, "sell");
+    step(s, { now: 12_000, mark: 137.8, live: live(137.8, []) });
+    assert.equal(s.impulse, "none");
+    const buys = s.orders.filter((o) => o.holdUntilFill && o.side === "buy");
+    assert.equal(buys.length, 1, "inside spacing — one order, not the old one plus a new one");
+    assert.ok(Math.abs(buys[0]!.price - 136) < 1e-6, "it stays on the old price");
+    assert.ok(buys[0]!.qty > 0.19, "size is the reached move, not the old clip");
+  });
+
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     const last = 140;
@@ -1630,7 +1664,8 @@ describe("SPCX accumulate", () => {
     assert.ok(!s.orders.some((o) => o.id === "leftover-sell"), "price went past the old sell — it is replaced, not kept");
     const replaced = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
     assert.equal(replaced.length, 1, "one accumulated sell");
-    assert.ok(Math.abs(replaced[0]!.price - mid) < 0.05, "accumulated sell at the cool price");
+    assert.ok(Math.abs(replaced[0]!.price - 144.5) < 0.05, "inside spacing — one sell stays on the old price");
+    assert.ok(replaced[0]!.qty > 0.05, "size is the reached move");
     const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
     assert.ok(
       s.orders.some((o) => o.side === "buy" && Math.abs(o.price - buy) < 0.05) ||

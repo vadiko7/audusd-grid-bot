@@ -1434,6 +1434,46 @@ describe("SPCX accumulate", () => {
     assert.equal(bunch.holdUntilFill, true);
   });
 
+  it("reopens a cool bunch until the position marks the fill", () => {
+    const s = createInitialState({ market: NATGAS, startingEquity: 10_000 });
+    s.lastFillPrice = 3;
+    s.lastFillAt = 1;
+    s.highestLvl = 3;
+    s.position = { size: 200, entry: 3.05 };
+    setArmed(s, true);
+    const hold = {
+      id: "bunch-live",
+      side: "buy" as const,
+      price: 2.96,
+      qty: 8.45,
+      notional: 25,
+      placedAt: 1,
+      mine: true,
+      holdUntilFill: true,
+    };
+    const book = (size: number, orders: typeof s.orders) =>
+      liveAccount({
+        equity: 10_000,
+        position: { size, entry: 3.05 },
+        positionNotional: size * 3,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 3, live: book(200, [hold]) });
+    assert.ok(s.openHolds.some((t) => t.side === "buy" && Math.abs(t.price - 2.96) < 1e-6));
+    step(s, { now: 40_000, mark: 3, live: book(200, []) });
+    assert.equal(s.fillsThisCycle.length, 0);
+    const again = s.actions.find((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - 2.96) < 1e-6);
+    assert.ok(again, "missing bunch is put back");
+    assert.equal(again.qty, 8.45);
+    s.orders = s.orders.filter((o) => o.holdUntilFill && Math.abs(o.price - 2.96) < 1e-6);
+    step(s, { now: 80_000, mark: 2.95, live: book(208.45, []) });
+    assert.ok(s.fillsThisCycle.some((f) => f.side === "buy" && Math.abs(f.price - 2.96) < 1e-6));
+    assert.ok(!s.openHolds.some((t) => Math.abs(t.price - 2.96) < 1e-6));
+    s.actions = [];
+    step(s, { now: 120_000, mark: 2.95, live: book(208.45, []) });
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy" && Math.abs(a.price - 2.96) < 1e-6));
+  });
+
   it("a campaign cools once — a new low does not place a second bunch", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     s.lastFillPrice = 140;

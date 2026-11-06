@@ -82,6 +82,7 @@ type SavedSettings = {
       campaignOrigin?: number;
       campaignSide?: string;
       campaignBunched?: boolean;
+      open_holds?: Array<{ side?: string; price?: number; qty?: number; reduceOnly?: boolean }>;
       reliefQty?: number;
       reliefBaseline?: number;
       reliefPrice?: number;
@@ -271,6 +272,7 @@ function saveSettings(book: {
     campaignOrigin: number | null;
     campaignSide: string | null;
     campaignBunched: boolean;
+    openHolds: Array<{ side: string; price: number; qty: number; reduceOnly?: boolean }>;
     relief: { qty: number; baselinePos: number; price: number } | null;
   };
 }) {
@@ -298,6 +300,9 @@ function saveSettings(book: {
     campaignOrigin: book.engine.campaignOrigin ?? undefined,
     campaignSide: book.engine.campaignSide ?? undefined,
     campaignBunched: book.engine.campaignBunched || undefined,
+    open_holds: book.engine.openHolds.length
+      ? book.engine.openHolds.map((t) => ({ side: t.side, price: t.price, qty: t.qty, reduceOnly: t.reduceOnly || undefined }))
+      : undefined,
     reliefQty: book.engine.relief?.qty,
     reliefBaseline: book.engine.relief?.baselinePos,
     reliefPrice: book.engine.relief?.price,
@@ -393,6 +398,14 @@ function makeBook(market: MarketProfile): Book {
   }
   if (savedM?.campaignBunched || ((savedM?.holdOrderIds?.length ?? 0) > 0 && engine.campaignSide)) {
     engine.campaignBunched = true;
+  }
+  if (Array.isArray(savedM?.open_holds)) {
+    engine.openHolds = savedM.open_holds.flatMap((t) => {
+      const price = Number(t?.price);
+      const qty = Number(t?.qty);
+      if ((t?.side !== "buy" && t?.side !== "sell") || !(price > 0) || !(qty > 0)) return [];
+      return [{ side: t.side, price, qty, reduceOnly: t.reduceOnly || undefined, triedAt: 0 }];
+    });
   }
   const reliefQty = Number(savedM?.reliefQty);
   const reliefBaseline = Number(savedM?.reliefBaseline);
@@ -594,7 +607,7 @@ async function tick() {
           mark: book.mark,
           live: book.live,
         });
-        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length || book.engine.campaignOrigin) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length || book.engine.campaignOrigin || book.engine.openHolds.length) saveSettings(book);
       }
     }
     drainAndSend();
@@ -796,7 +809,7 @@ async function main() {
           `${book.market.symbol} live equity $${book.engine.accountEquity?.toFixed(2)} pos ${book.engine.position.size} mark ${book.mark} remaining $${remainingCapacity(book.engine).toFixed(0)} foreignMargin $${book.engine.foreignMargin.toFixed(2)}`,
         );
         if (WANT_ARM) setArmed(book.engine, true);
-        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length || book.engine.campaignOrigin) saveSettings(book);
+        if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length || book.engine.campaignOrigin || book.engine.openHolds.length) saveSettings(book);
         for (const l of book.engine.logs.slice(-8)) {
           if (
             l.level === "gate" ||

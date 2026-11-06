@@ -33,6 +33,7 @@ import type {
   GridOrder,
   LiveAccount,
   LogLevel,
+  OpenHold,
   Side,
   StepInput,
 } from "./types.ts";
@@ -112,6 +113,7 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     unackedPosDelta: 0,
     highestLvl: null,
     holdIds: [],
+    openHolds: [],
     soldRungs: [],
   };
 }
@@ -407,6 +409,10 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     if (!isMineOrder(order)) return false;
     if (nextIds.has(order.id)) return false;
     if (cancelled.has(order.id) || state.cancelSentAt[order.id]) return false;
+    if (isHoldOrder(order)) {
+      const posMoved = (order.side === "sell" && posDelta < -eps) || (order.side === "buy" && posDelta > eps);
+      return posMoved;
+    }
     if (order.id.startsWith("pending:")) {
       const onBook = liveOpen.some((o) => o.side === order.side && sameRung(o.price, order.price, state.factor));
       if (onBook) return false;
@@ -429,6 +435,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     if (!cand) break;
     filledIds.add(cand.id);
     budget -= dirOf(cand) * cand.qty;
+    if (isHoldOrder(cand)) forgetOpenHold(state, cand);
     const fill: Fill = {
       orderId: cand.id,
       side: cand.side,
@@ -440,7 +447,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     if (cand.side === "sell") rememberSoldRung(state, cand.price);
   }
   for (const o of vanished) {
-    if (filledIds.has(o.id)) continue;
+    if (filledIds.has(o.id) || isHoldOrder(o)) continue;
     if (!wouldHaveHit(o, state.mark, state.factor)) continue;
     filledIds.add(o.id);
     const fill: Fill = {
@@ -500,6 +507,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   const merged = dedupRungs(state, [...liveOpen, ...stillPending]);
   state.orders = applyHoldFlags(state, prev, merged);
   state.cancelledIds = [...stillCancelled];
+  reopenMissingHolds(state);
   if (!state.lastFillPrice) {
     const inferred = inferLastFill(state, state.orders);
     if (inferred) {
@@ -545,9 +553,15 @@ function applyHoldFlags(state: EngineState, prev: GridOrder[], next: GridOrder[]
     if (pendingHolds.some((p) => p.side === o.side && sameRung(p.price, o.price, state.factor))) {
       return { ...o, holdUntilFill: true, mine: true };
     }
+    if (state.openHolds.some((t) => t.side === o.side && sameRung(t.price, o.price, state.factor))) {
+      return { ...o, holdUntilFill: true, mine: true };
+    }
     return o;
   });
   state.holdIds = [...new Set(out.filter(isHoldOrder).map((o) => o.id).filter((id) => !id.startsWith("pending:")))];
+  for (const o of out) {
+    if (isHoldOrder(o)) rememberOpenHold(state, o);
+  }
   return out;
 }
 
@@ -811,6 +825,7 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
   state.orders = [...state.orders, order];
   if (opts.holdUntilFill) {
     state.holdIds = [...new Set([...state.holdIds, order.id])];
+    rememberOpenHold(state, order, reduceOnly);
   }
   emit(state, { type: "place", side, price, qty, why, reduceOnly: reduceOnly || undefined });
   const expect = expectedFillPnl(state, side, price, qty);
@@ -829,6 +844,43 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
 
 function isHoldOrder(order: GridOrder): boolean {
   return order.holdUntilFill === true;
+}
+
+function rememberOpenHold(state: EngineState, order: GridOrder, reduceOnly?: boolean) {
+  const price = roundPrice(order.price, state.config.market.priceDecimals);
+  const hit = state.openHolds.find((t) => t.side === order.side && sameRung(t.price, price, state.factor));
+  if (hit) {
+    hit.qty = order.qty;
+    hit.price = price;
+    if (reduceOnly) hit.reduceOnly = true;
+    return;
+  }
+  const ticket: OpenHold = { side: order.side, price, qty: order.qty, reduceOnly: reduceOnly || undefined, triedAt: 0 };
+  state.openHolds = [...state.openHolds, ticket];
+}
+
+function forgetOpenHold(state: EngineState, order: GridOrder) {
+  state.openHolds = state.openHolds.filter(
+    (t) => !(t.side === order.side && sameRung(t.price, order.price, state.factor)),
+  );
+  state.holdIds = state.holdIds.filter((id) => id !== order.id);
+}
+
+function reopenMissingHolds(state: EngineState) {
+  if (!state.config.armed || state.accountSource !== "live" || state.openHolds.length === 0) return;
+  for (const ticket of state.openHolds) {
+    const resting = state.orders.some((o) => o.side === ticket.side && sameRung(o.price, ticket.price, state.factor));
+    if (resting) continue;
+    if (state.now - (ticket.triedAt ?? 0) < 20_000) continue;
+    ticket.triedAt = state.now;
+    placeLimit(state, ticket.side, ticket.price, "reopen impulse until fill", {
+      qty: ticket.qty,
+      reduceOnly: ticket.reduceOnly,
+      allowExtra: true,
+      allowImpulse: true,
+      holdUntilFill: true,
+    });
+  }
 }
 
 function isMineOrder(order: GridOrder): boolean {
@@ -1214,6 +1266,7 @@ export function setArmed(state: EngineState, armed: boolean): EngineState {
     }
   } else {
     cancelAll(state, "disarmed");
+    state.openHolds = [];
     pushLog(state, "info", "disarmed — working limits cancelled");
   }
   return state;
@@ -1250,6 +1303,7 @@ export function flattenAtMark(state: EngineState): EngineState {
   const side: Side = state.position.size < 0 ? "buy" : "sell";
   if (state.accountSource === "live") {
     cancelAll(state, "flatten");
+    state.openHolds = [];
     emit(state, { type: "place", side, price: roundPrice(state.mark, state.config.market.priceDecimals), qty, why: "flatten", reduceOnly: true });
     pushLog(state, "info", `flatten ${side.toUpperCase()} ${qty.toFixed(1)} @ mark (reduce-only limit)`);
     return state;
@@ -1262,6 +1316,7 @@ export function flattenAtMark(state: EngineState): EngineState {
     ts: state.now,
   });
   cancelAll(state, "flatten");
+  state.openHolds = [];
   pushLog(state, "info", `flatten ${side.toUpperCase()} ${qty.toFixed(1)} @ ${state.mark.toFixed(5)}`);
   return state;
 }

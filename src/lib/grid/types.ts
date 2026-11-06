@@ -23,8 +23,16 @@ export type GridOrder = {
   clientOrderIndex?: number;
   /** false = someone else's / leftover; occupies the rung, never cancel */
   mine?: boolean;
-  /** Impulse-cool bunch: rest at mid until fill. Never cancel as extra. */
+  /** Impulse / cool bunch that must stay on the book until the position marks it filled. */
   holdUntilFill?: boolean;
+};
+
+export type OpenHold = {
+  side: Side;
+  price: number;
+  qty: number;
+  reduceOnly?: boolean;
+  triedAt?: number;
 };
 
 export type Position = {
@@ -150,6 +158,8 @@ export type EngineState = {
   highestLvl: number | null;
   /** Live order ids of resting bunch limits (persist across ingest / restart). */
   holdIds: string[];
+  /** Cool / impulse limits to keep replacing until a real fill. */
+  openHolds: OpenHold[];
   /** Sell rungs that filled (or vanished at/through mark). Do not re-place. */
   soldRungs: Array<{ price: number; at: number }>;
 };

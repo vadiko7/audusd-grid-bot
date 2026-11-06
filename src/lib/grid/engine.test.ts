@@ -1546,6 +1546,41 @@ describe("SPCX accumulate", () => {
     assert.ok(s.orders.some((o) => o.holdUntilFill && o.side === "sell"), "the up-move still sells once");
   });
 
+  it("unreached order is put back and a new bunch opens at the price that was reached", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    setArmed(s, true);
+    const deep = {
+      id: "deep-buy",
+      side: "buy" as const,
+      price: 130,
+      qty: 0.19,
+      notional: 25,
+      placedAt: 1,
+      mine: true,
+      holdUntilFill: true,
+    };
+    const live = (mark: number, orders: typeof s.orders) =>
+      liveAccount({
+        equity: 8000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 4 * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 136, live: live(136, [deep]) });
+    assert.equal(s.impulse, "sell");
+    step(s, { now: 12_000, mark: 137, live: live(137, []) });
+    assert.equal(s.impulse, "none");
+    const back = s.orders.find((o) => o.side === "buy" && Math.abs(o.price - 130) < 1e-6);
+    assert.ok(back, "130 was not reached — that buy goes back");
+    const reached = s.orders.find((o) => o.holdUntilFill && o.side === "buy" && Math.abs(o.price - 136) < 0.05);
+    assert.ok(reached, "new buy bunch sits where the drop reached");
+    assert.ok(Math.abs(reached.price - back.price) > 1, "the new bunch is not the old order");
+  });
+
   it("impulse cool bunch and ±1 ignore nearby leftover holds (same-rung only)", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 8000 });
     const last = 140;

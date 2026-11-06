@@ -1606,10 +1606,8 @@ function impulseCoolCatch(state: EngineState): void {
   const mid = roundPrice(state.mark, m.priceDecimals);
   const side: Side = cooledFrom === "sell" ? "buy" : cooledFrom === "buy" ? "sell" : state.mark > origin ? "sell" : "buy";
   const settled = resolveParkedHolds(state, extreme, true);
-  if (settled.restored.has(side) && !settled.replaced.has(side)) {
-    pushLog(state, "impulse", `impulse ${tag} — restored the bunch, price did not reach it`);
-    return;
-  }
+  const keptUnreached = settled.restored.has(side) && !settled.replaced.has(side);
+  const bunchAt = keptUnreached ? roundPrice(extreme, m.priceDecimals) : mid;
   if (isFlat(state) && side !== (m.prefer === "long" ? "buy" : "sell")) {
     pushLog(state, "impulse", `impulse ${tag} far but flat — skip ${side} bunch (prefer ${m.prefer}), continue ±1`);
         return;
@@ -1676,9 +1674,11 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", "impulse bunch skip — qty below Lighter min, continue as is");
         return;
   }
-  const why = `impulse-${tag} bunch ${nLevels} lvl @ mid`;
+  const why = keptUnreached
+    ? `impulse-${tag} bunch ${nLevels} lvl @ reached ${bunchAt.toFixed(m.priceDecimals)}`
+    : `impulse-${tag} bunch ${nLevels} lvl @ mid`;
   if (
-    !placeLimit(state, side, mid, why, {
+    !placeLimit(state, side, bunchAt, why, {
       qty,
       reduceOnly,
       allowExtra: true,
@@ -1689,16 +1689,18 @@ function impulseCoolCatch(state: EngineState): void {
     pushLog(state, "impulse", `impulse ${tag} bunch not placed — continue as is`);
         return;
   }
-  state.lastFillPrice = mid;
+  state.lastFillPrice = bunchAt;
   state.lastFillSide = side;
   state.lastFillAt = state.now;
   state.campaignBunched = true;
-  if (acc) ratchetHighest(state, mid, `${tag} bunch placed`);
+  if (acc) ratchetHighest(state, bunchAt, `${tag} bunch placed`);
   pushLog(
     state,
     "place",
-    `impulse ${tag} LIMIT ${side.toUpperCase()} ${mid.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} step impulse ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)} · hold until fill`,
-    { side, price: mid, qty, exec: "limit", n: nLevels, distPct, steps: rawSteps, origin, extreme, hold: true },
+    keptUnreached
+      ? `impulse ${tag} LIMIT ${side.toUpperCase()} ${bunchAt.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ reached · old order put back · ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)}`
+      : `impulse ${tag} LIMIT ${side.toUpperCase()} ${bunchAt.toFixed(m.priceDecimals)} × ${qty.toFixed(m.sizeDecimals)} @ mid · ${nLevels} step impulse ${origin.toFixed(m.priceDecimals)}→${extreme.toFixed(m.priceDecimals)} · hold until fill`,
+    { side, price: bunchAt, qty, exec: "limit", n: nLevels, distPct, steps: rawSteps, origin, extreme, hold: true },
   );
   if (side === "buy" && state.position.size > 0) {
     const tp = upLevel(mid, tpFactorOf(m, state.factor), m.priceDecimals);

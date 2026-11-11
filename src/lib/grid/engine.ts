@@ -267,6 +267,14 @@ function plusPnlSell(state: EngineState, price: number): boolean {
   return price > entry;
 }
 
+/** A sell under the average entry is still a win on a clip we actually bought cheaper. */
+function boughtUnder(state: EngineState, sellPrice: number): boolean {
+  if (state.lastFillSide === "buy" && (state.lastFillPrice ?? 0) > 0 && state.lastFillPrice! < sellPrice - 1e-12) {
+    return true;
+  }
+  return state.openHolds.some((t) => t.side === "buy" && t.price < sellPrice - 1e-12);
+}
+
 function fillAnchor(state: EngineState): number | null {
   if (state.lastFillPrice && state.lastFillPrice > 0) return state.lastFillPrice;
   return null;
@@ -646,8 +654,14 @@ function gateCandidate(state: EngineState, side: Side, target: number, opts: Pla
 
   if (acc && side === "sell") {
     if (isFlat(state) || state.position.size <= 0) return { reason: "flat — no sells (no shorts)" };
+    const aboveEntry = plusPnlSell(state, target);
+    if (!aboveEntry && !boughtUnder(state, target)) {
+      return {
+        reason: `below entry ${state.position.entry.toFixed(state.config.market.priceDecimals)} and no buy under this sell — will not close in minus`,
+      };
+    }
     const atCap = !underBuyCap(state);
-    if (atCap && !opts.allowUnderwater && !plusPnlSell(state, target)) {
+    if (atCap && !aboveEntry && !opts.allowUnderwater) {
       return { reason: `buy-cap — sell only +PnL above entry ${state.position.entry.toFixed(state.config.market.priceDecimals)}` };
     }
   }
@@ -1093,51 +1107,12 @@ function dropOrder(state: EngineState, order: GridOrder, why: string) {
 function accumulateTargets(state: EngineState): { side: Side; price: number }[] {
   if (!fillAnchor(state)) return [];
   const levels = validLevels(state);
-  const m = state.config.market;
   const out: { side: Side; price: number }[] = [];
   if (state.impulse !== "buy") out.push({ side: "buy", price: levels.buy });
   if (!isFlat(state) && state.position.size > 0) {
     out.push({ side: "sell", price: levels.sell });
-    if (state.impulse === "buy") {
-      let px = levels.sell;
-      const tpF = tpFactorOf(m, state.factor);
-      for (let i = 0; i < 5; i++) {
-        px = upLevel(px, tpF, m.priceDecimals);
-        if (px <= state.mark) continue;
-        if (!plusPnlSell(state, px)) continue;
-        out.push({ side: "sell", price: px });
-      }
-    }
   }
   return out;
-}
-
-function harvestRipSells(state: EngineState) {
-  if (!isAccumulate(state) || state.impulse !== "buy") return;
-  if (isFlat(state) || state.position.size <= 0) return;
-  const mineSells = state.orders.filter((x) => isMineOrder(x) && x.side === "sell");
-  if (mineSells.length >= 1) return;
-  const m = state.config.market;
-  const levels = validLevels(state);
-  let px = levels.sell;
-  const tpF = tpFactorOf(m, state.factor);
-  const ticket = state.config.orderNotional;
-  const harvest = m.harvestSellFrac ?? 0.25;
-  const floor = m.minQuoteNotional ?? 13;
-  const usd = Math.max(ticket * harvest, floor);
-  for (let i = 0; i < 6; i++) {
-    if (i > 0) px = upLevel(px, tpF, m.priceDecimals);
-    if (px <= state.mark) continue;
-    if (!plusPnlSell(state, px)) continue;
-    if (hasNear(state, px, "sell")) continue;
-    if (soldRungRecently(state, px)) continue;
-    let qty = baseQty(px, usd, m.sizeDecimals);
-    qty = roundQty(Math.min(qty, Math.abs(state.position.size)), m.sizeDecimals);
-    if (qty <= 0) break;
-    if (placeLimit(state, "sell", px, "impulse harvest +PnL", { qty, reduceOnly: true, allowImpulse: true, allowExtra: true })) {
-      return;
-    }
-  }
 }
 
 function cleanInvalid(state: EngineState) {
@@ -1225,10 +1200,7 @@ export function maintainPair(state: EngineState, why: string) {
   if (isAccumulate(state)) {
     const m = state.config.market;
     const levels = validLevels(state);
-    if (state.impulse === "buy") {
-      harvestRipSells(state);
-      return;
-    }
+    if (state.impulse === "buy") return;
     if (state.impulse !== "none") return;
     const needSell = !isFlat(state) && state.position.size > 0 && !hasNear(state, levels.sell, "sell");
     const needBuy = underBuyCap(state) && state.impulse === "none" && !hasNear(state, levels.buy, "buy");
@@ -1277,10 +1249,7 @@ function postFillMissed(state: EngineState, fill: Fill) {
   }
   state.orders = keep;
   if (isAccumulate(state)) {
-    if (state.impulse === "buy") {
-      harvestRipSells(state);
-      return;
-    }
+    if (state.impulse === "buy") return;
     if (state.impulse !== "none") {
       pushLog(state, "impulse", `post-fill skip new buys until impulse cools (anchor ${fill.price.toFixed(m.priceDecimals)})`);
       if (!isFlat(state) && !hasNear(state, up, "sell")) {
@@ -1503,43 +1472,126 @@ function reliefStillOpen(state: EngineState): boolean {
   );
 }
 
-function pullReliefQty(state: EngineState): number {
+function pullRelief(state: EngineState): { qty: number; price: number } | null {
   const relief = state.relief;
-  if (!relief) return 0;
+  if (!relief) return null;
   const sold = Math.max(0, relief.baselinePos - state.position.size);
   const qty = roundQty(Math.min(relief.qty, sold), state.config.market.sizeDecimals);
+  const price = relief.price;
   state.relief = null;
-  return qty > 0 ? qty : 0;
+  return qty > 0 ? { qty, price } : null;
 }
 
-function placeRecuperate(state: EngineState, qty: number) {
+function lowerBunchForRecuperate(
+  state: EngineState,
+  soldAt: number,
+  start: number,
+): { price: number; qty: number } | null {
+  const seen: { price: number; qty: number }[] = [];
+  for (const ticket of state.openHolds) {
+    if (ticket.side !== "buy" || !(ticket.price < soldAt - 1e-12) || !(ticket.price < start - 1e-12)) continue;
+    seen.push({ price: ticket.price, qty: ticket.qty });
+  }
+  for (const order of state.orders) {
+    if (!isHoldOrder(order) || order.side !== "buy") continue;
+    if (!(order.price < soldAt - 1e-12) || !(order.price < start - 1e-12)) continue;
+    if (seen.some((hit) => sameRung(hit.price, order.price, state.factor))) continue;
+    seen.push({ price: order.price, qty: order.qty });
+  }
+  if (seen.length === 0) return null;
+  return seen.reduce((a, b) => (a.price > b.price ? a : b));
+}
+
+function placeRecuperate(state: EngineState, qty: number, soldAt: number) {
   const m = state.config.market;
-  const mid = roundPrice(state.mark, m.priceDecimals);
   const clip = roundQty(qty, m.sizeDecimals);
-  if (!(clip > 0) || !meetsExchangeMins(state, clip, mid)) {
-    pushLog(state, "impulse", "cap-relief filled but recuperate skipped — qty below min");
+  if (!(clip > 0)) return;
+  const cool = state.mark;
+  if (cool < soldAt - 1e-12) {
+    const mid = roundPrice(cool, m.priceDecimals);
+    if (!meetsExchangeMins(state, clip, mid)) {
+      pushLog(state, "impulse", "cap-relief filled but recuperate skipped — qty below min");
+      return;
+    }
+    if (
+      !placeLimit(state, "buy", mid, "recuperate cap-relief", {
+        qty: clip,
+        allowExtra: true,
+        allowImpulse: true,
+        holdUntilFill: true,
+      })
+    ) {
+      pushLog(state, "impulse", "cap-relief recuperate not placed");
+      return;
+    }
+    state.lastFillPrice = mid;
+    state.lastFillSide = "buy";
+    state.lastFillAt = state.now;
+    state.impulseAnchor = mid;
+    pushLog(
+      state,
+      "place",
+      `recuperate BUY ${mid.toFixed(m.priceDecimals)} × ${clip.toFixed(m.sizeDecimals)} — cool is below the sell ${soldAt.toFixed(m.priceDecimals)}`,
+      { side: "buy", price: mid, qty: clip, hold: true },
+    );
+    return;
+  }
+  const start = state.campaignOrigin ?? state.impulseOrigin ?? fillAnchor(state) ?? soldAt;
+  const bunch = lowerBunchForRecuperate(state, soldAt, start);
+  if (bunch) {
+    const merged = roundQty(bunch.qty + clip, m.sizeDecimals);
+    for (const order of [...state.orders]) {
+      if (order.side !== "buy" || !sameRung(order.price, bunch.price, state.factor)) continue;
+      emitCancel(state, order, "add recuperate onto lower bunch");
+      state.orders = state.orders.filter((o) => o.id !== order.id);
+      forgetOpenHold(state, order);
+    }
+    state.openHolds = state.openHolds.filter(
+      (t) => !(t.side === "buy" && sameRung(t.price, bunch.price, state.factor)),
+    );
+    if (
+      !placeLimit(state, "buy", bunch.price, "recuperate added to bunch below impulse start", {
+        qty: merged,
+        allowExtra: true,
+        allowImpulse: true,
+        holdUntilFill: true,
+      })
+    ) {
+      pushLog(state, "impulse", "recuperate not added to the lower bunch");
+      return;
+    }
+    pushLog(
+      state,
+      "place",
+      `recuperate added × ${clip.toFixed(m.sizeDecimals)} onto BUY ${bunch.price.toFixed(m.priceDecimals)} — cool ${cool.toFixed(m.priceDecimals)} is not below the sell ${soldAt.toFixed(m.priceDecimals)}`,
+      { side: "buy", price: bunch.price, qty: merged, hold: true },
+    );
+    return;
+  }
+  const px = downLevel(soldAt, state.factor, m.priceDecimals);
+  if (!meetsExchangeMins(state, clip, px)) {
+    pushLog(state, "impulse", "recuperate one-lvl skipped — qty below min");
     return;
   }
   if (
-    !placeLimit(state, "buy", mid, "recuperate cap-relief", {
+    !placeLimit(state, "buy", px, "one lvl bunch below the sell", {
       qty: clip,
       allowExtra: true,
       allowImpulse: true,
       holdUntilFill: true,
     })
   ) {
-    pushLog(state, "impulse", "cap-relief recuperate not placed");
+    pushLog(state, "impulse", "one lvl bunch below the sell not placed");
     return;
   }
-  state.lastFillPrice = mid;
+  state.lastFillPrice = px;
   state.lastFillSide = "buy";
   state.lastFillAt = state.now;
-  state.impulseAnchor = mid;
   pushLog(
     state,
     "place",
-    `recuperate BUY ${mid.toFixed(m.priceDecimals)} × ${clip.toFixed(m.sizeDecimals)} — same clip sold on the dump`,
-    { side: "buy", price: mid, qty: clip, hold: true },
+    `one lvl BUY ${px.toFixed(m.priceDecimals)} × ${clip.toFixed(m.sizeDecimals)} — cool ${cool.toFixed(m.priceDecimals)} was not below the sell ${soldAt.toFixed(m.priceDecimals)}, no bunch under the start`,
+    { side: "buy", price: px, qty: clip, hold: true },
   );
 }
 
@@ -1610,14 +1662,14 @@ function impulseCoolCatch(state: EngineState): void {
   state.impulseJustCooled = false;
   const cooledFrom = state.impulseCooledFrom;
   state.impulseCooledFrom = null;
-  const recuperateQty = pullReliefQty(state);
+  const recuperate = pullRelief(state);
   const origin = state.campaignOrigin ?? state.impulseOrigin ?? fillAnchor(state);
   const extreme = state.impulseExtreme ?? state.campaignExtreme ?? state.mark;
   state.impulseOrigin = null;
   state.impulseExtreme = null;
-  if (recuperateQty > 0 && state.config.armed && state.mark > 0) {
+  if (recuperate && state.config.armed && state.mark > 0) {
     cancelBotLeftovers(state, "impulse cool leftovers");
-    placeRecuperate(state, recuperateQty);
+    placeRecuperate(state, recuperate.qty, recuperate.price);
     state.campaignBunched = true;
     return;
   }
@@ -1793,10 +1845,9 @@ function runArmedCycle(state: EngineState) {
   if (catching) {
     impulseCoolCatch(state);
   } else if (state.impulse !== "none") {
-    if (isAccumulate(state) && state.impulse === "buy") harvestRipSells(state);
+    // up impulse does not sell; the cool places the reduce. down impulse only clips at the cap.
   } else if (isAccumulate(state) && anchor) {
     cleanInvalid(state);
-    if (state.impulse === "buy") harvestRipSells(state);
   } else if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
     recenter(state, `adverse ≥ ${steps} steps against short`);
     waitFill = true;

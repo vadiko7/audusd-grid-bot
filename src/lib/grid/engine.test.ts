@@ -1244,7 +1244,7 @@ describe("SPCX accumulate", () => {
     assert.equal(s.highestLvl, hi);
   });
 
-  it("buy impulse harvests reduce-only sells and blocks new buys", () => {
+  it("up impulse does not sell; the reduce waits for the cool", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     const last = 140;
     s.lastFillPrice = last;
@@ -1264,34 +1264,11 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"), "no reduce while price is still running up");
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
-    const sells = s.actions.filter((a) => a.type === "place" && a.side === "sell");
-    assert.ok(sells.length >= 1);
-    assert.ok(sells.every((a) => a.reduceOnly));
-    const live = liveAccount({
-      equity: 2000,
-      position: { size: 4, entry: 138 },
-      positionNotional: 560,
-      orders: s.orders.filter((o) => !o.id.startsWith("pending:")),
-    });
-    for (let i = 1; i <= 8; i++) {
-      step(s, { now: t0 + 50_000 + i * 2_000, mark: 142.6 + i * 0.05, live });
-    }
-    assert.equal(s.impulse, "buy");
-    assert.equal(s.orders.filter((o) => o.side === "sell" && o.mine !== false).length, 1, "harvest must not stack a new sell every cycle");
-  });
-
-  it("UP cool on a hard reversal sells that leg once, then starts DOWN with no second bunch", () => {
-    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
-    s.lastFillPrice = 140;
-    s.lastFillAt = 1;
-    s.highestLvl = 140;
-    s.position = { size: 4, entry: 138 };
-    const t0 = 10_000;
-    setArmed(s, true);
     step(s, {
-      now: t0 + 50_000,
-      mark: 142.6,
+      now: t0 + 52_000,
+      mark: 141.6,
       live: liveAccount({
         equity: 2000,
         position: { size: 4, entry: 138 },
@@ -1299,22 +1276,43 @@ describe("SPCX accumulate", () => {
         orders: [],
       }),
     });
+    assert.equal(s.impulse, "none");
+    const sells = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
+    assert.equal(sells.length, 1, "the cool places the one reduce");
+    assert.ok(sells[0]!.price > 138, "that reduce is above entry");
+  });
+
+  it("UP cool on a hard reversal sells that leg once, then starts DOWN with no second bunch", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 5000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 130 };
+    const t0 = 10_000;
+    setArmed(s, true);
+    step(s, {
+      now: t0 + 50_000,
+      mark: 142.6,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 4, entry: 130 },
+        positionNotional: 560,
+        orders: [],
+      }),
+    });
     assert.equal(s.impulse, "buy");
-    const harvestId = s.orders.find((o) => o.side === "sell")?.id;
-    assert.ok(harvestId);
+    assert.ok(!s.orders.some((o) => o.side === "sell"), "no sell while the up impulse is running");
     step(s, {
       now: t0 + 100_000,
       mark: 136,
       live: liveAccount({
         equity: 2000,
-        position: { size: 4, entry: 138 },
+        position: { size: 4, entry: 130 },
         positionNotional: 544,
-        orders: s.orders.filter((o) => o.id === harvestId).map((o) => ({ ...o, id: harvestId })),
+        orders: [],
       }),
     });
     assert.equal(s.impulse, "sell");
-    assert.ok(s.actions.some((a) => a.type === "cancel" && a.orderId === harvestId));
-    assert.ok(!s.orders.some((o) => o.id === harvestId));
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"), "no buy bunch on the reversal — the UP leg sells");
     const sellBunch = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
     assert.equal(sellBunch.length, 1, "one cool bunch, not a flip bunch plus a cool bunch");
@@ -1674,10 +1672,12 @@ describe("SPCX accumulate", () => {
     );
   });
 
-  it("sell impulse with a full buy cap sells one ticket then buys that qty back", () => {
+  it("sell impulse with a full buy cap sells one ticket, and a cool above that sell does not buy it back there", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 500 });
-    s.lastFillPrice = 140;
+    s.lastFillPrice = 130;
+    s.lastFillSide = "buy";
     s.lastFillAt = 1;
+    s.impulseAnchor = 140;
     s.highestLvl = 150;
     s.position = { size: 11, entry: 138 };
     setArmed(s, true);
@@ -1692,7 +1692,7 @@ describe("SPCX accumulate", () => {
     assert.equal(s.impulse, "sell");
     assert.ok(buyUsedUsd(s) >= buyCapUsd(s));
     const clip = s.actions.find((a) => a.type === "place" && a.side === "sell" && a.why.includes("cap-relief"));
-    assert.ok(clip, "one reduce-only clip while the dump is on");
+    assert.ok(clip, "one reduce-only clip while the dump is on, above a buy we already have");
     assert.equal(clip.reduceOnly, true);
     const one = baseQty(136, 25, SPCX.sizeDecimals);
     assert.ok(Math.abs(clip.qty - one) / one < 0.15, "clip is one $25 ticket, not the whole bag");
@@ -1700,10 +1700,52 @@ describe("SPCX accumulate", () => {
     const sold = clip.qty;
     step(s, { now: 12_000, mark: 137, live: live(11 - sold, 137) });
     assert.equal(s.impulse, "none");
-    const back = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("recuperate"));
-    assert.ok(back, "cool buys the same clip back");
-    assert.ok(Math.abs(back.qty - sold) / sold < 0.05);
-    assert.ok(!s.actions.some((a) => a.type === "place" && a.why.includes("bunch")), "do not also buy the whole dump");
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy" && a.price >= 136), "do not buy the clip back at or above the sell");
+    const down = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("one lvl bunch"));
+    assert.ok(down, "no bunch under the start — one level below the sell");
+    assert.ok(Math.abs(down.price - downLevel(136, SPCX.defaultFactor, SPCX.priceDecimals)) < 0.001);
+    assert.ok(Math.abs(down.qty - sold) / sold < 0.05);
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.why.includes("impulse-cool")), "do not also buy the whole dump");
+  });
+
+  it("a cool above the down-impulse sell adds that size onto the bunch under the start", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 500 });
+    s.lastFillPrice = 130;
+    s.lastFillSide = "buy";
+    s.lastFillAt = 1;
+    s.impulseAnchor = 140;
+    s.highestLvl = 150;
+    s.position = { size: 11, entry: 138 };
+    const bunch = {
+      id: "bunch-132",
+      side: "buy" as const,
+      price: 132,
+      qty: 0.2,
+      notional: 26.4,
+      placedAt: 1,
+      mine: true,
+      holdUntilFill: true,
+    };
+    s.openHolds = [{ side: "buy", price: 132, qty: 0.2 }];
+    s.holdIds = ["bunch-132"];
+    setArmed(s, true);
+    const live = (size: number, mark: number, orders: typeof s.orders) =>
+      liveAccount({
+        equity: 500,
+        position: { size, entry: 138 },
+        positionNotional: size * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 136, live: live(11, 136, [bunch]) });
+    const clip = s.actions.find((a) => a.type === "place" && a.side === "sell" && a.why.includes("cap-relief"));
+    assert.ok(clip);
+    const sold = clip.qty;
+    step(s, { now: 12_000, mark: 137, live: live(11 - sold, 137, []) });
+    const added = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("added to bunch"));
+    assert.ok(added, "the sold clip is added to the bunch below the impulse start");
+    assert.ok(Math.abs(added.price - 132) < 0.001);
+    assert.ok(added.qty > 0.2 + sold * 0.5);
+    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy" && a.price >= 136));
   });
 
   it("arms ETH from last fill with no 50s history", () => {

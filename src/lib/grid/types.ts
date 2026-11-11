@@ -25,6 +25,10 @@ export type GridOrder = {
   mine?: boolean;
   /** Impulse / cool bunch that must stay on the book until the position marks it filled. */
   holdUntilFill?: boolean;
+  /** Stable id in the order journal. Survives pending → exchange id. */
+  journalId?: string;
+  /** Up-impulse probe. Stays until fill — a cool must not merge it just because it sits one step from the high. */
+  impulseProbe?: boolean;
 };
 
 export type OpenHold = {
@@ -58,7 +62,33 @@ export type Candle = {
   c: number;
 };
 
-export type MarkTick = { t: number; p: number };
+export type OrderStatus = "open" | "filled" | "canceled";
+
+/** One row per order. impulsePct grows with the leg; impulsePctAtPlace is the size when we sent it. */
+export type OrderRecord = {
+  id: string;
+  exchangeId: string;
+  symbol: string;
+  side: Side;
+  price: number;
+  qty: number;
+  notional: number;
+  reduceOnly: boolean;
+  why: string;
+  impulse: Impulse;
+  /** |extreme − origin| / origin × 100 while this order was open. Frozen on fill or cancel. */
+  impulsePct: number;
+  /** Same measure at the moment the order was sent. */
+  impulsePctAtPlace: number;
+  placedAt: number;
+  mark: number;
+  status: OrderStatus;
+  closedAt: number | null;
+  closePx: number | null;
+  pnl: number | null;
+};
+
+export type OrderEvent = OrderRecord & { event: "place" | "filled" | "canceled" | "update" };
 
 export type LogEvent = {
   ts: number;
@@ -164,6 +194,18 @@ export type EngineState = {
   openHolds: OpenHold[];
   /** Sell rungs that filled (or vanished at/through mark). Do not re-place. */
   soldRungs: Array<{ price: number; at: number }>;
+  /** Every bot order, from place until fill or cancel. Capped; the desk and CSV keep the tail. */
+  orderLog: OrderRecord[];
+  /** Events emitted this step. The process appends them to data/orders.csv. */
+  orderEvents: OrderEvent[];
+  journalSeq: number;
+  /** This up-impulse already sent its one buy. Cleared when the leg ends. */
+  upProbe: boolean;
+  /** Excursion of the leg that just ended. Cool-catch orders inherit it. */
+  lastLegPct: number;
+  lastLegSide: Impulse;
+  /** True only while the cool catch is placing. */
+  orderLeg: boolean;
 };
 
 export type StepInput = {

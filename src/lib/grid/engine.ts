@@ -34,6 +34,8 @@ import type {
   LiveAccount,
   LogLevel,
   OpenHold,
+  OrderEvent,
+  OrderRecord,
   Side,
   StepInput,
 } from "./types.ts";
@@ -115,6 +117,13 @@ export function createInitialState(config: Partial<EngineConfig> = {}): EngineSt
     holdIds: [],
     openHolds: [],
     soldRungs: [],
+    orderLog: [],
+    orderEvents: [],
+    journalSeq: 1,
+    upProbe: false,
+    lastLegPct: 0,
+    lastLegSide: "none",
+    orderLeg: false,
   };
 }
 
@@ -347,6 +356,8 @@ function detectFills(state: EngineState): Fill[] {
 }
 
 function applyFill(state: EngineState, fill: Fill) {
+  const order = state.orders.find((o) => o.id === fill.orderId);
+  if (order) closeOrderRecord(state, order, "filled", reducePnl(state, fill.side, fill.price, fill.qty));
   const signed = signedSize(fill.side, fill.qty);
   const pos = state.position;
   if (pos.size === 0 || Math.sign(pos.size) === Math.sign(signed)) {
@@ -444,6 +455,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     filledIds.add(cand.id);
     budget -= dirOf(cand) * cand.qty;
     if (isHoldOrder(cand)) forgetOpenHold(state, cand);
+    closeOrderRecord(state, cand, "filled", reducePnl(state, cand.side, cand.price, cand.qty));
     const fill: Fill = {
       orderId: cand.id,
       side: cand.side,
@@ -458,6 +470,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
     if (filledIds.has(o.id) || isHoldOrder(o)) continue;
     if (!wouldHaveHit(o, state.mark, state.factor)) continue;
     filledIds.add(o.id);
+    closeOrderRecord(state, o, "filled", reducePnl(state, o.side, o.price, o.qty));
     const fill: Fill = {
       orderId: o.id,
       side: o.side,
@@ -489,6 +502,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
 
   for (const order of vanished) {
     if (filledIds.has(order.id)) continue;
+    closeOrderRecord(state, order, "canceled");
     pushLog(
       state,
       "info",
@@ -500,6 +514,7 @@ function ingestLive(state: EngineState, live: LiveAccount) {
   const stillPending = pending.filter((p) => {
     if (liveOpen.some((o) => o.side === p.side && sameRung(o.price, p.price, state.factor))) return false;
     if (state.now - p.placedAt > PENDING_MS) {
+      closeOrderRecord(state, p, "canceled");
       pushLog(state, "warn", `pending ${p.side.toUpperCase()} ${p.price.toFixed(5)} expired — will re-place`);
       return false;
     }
@@ -556,7 +571,12 @@ function applyHoldFlags(state: EngineState, prev: GridOrder[], next: GridOrder[]
   const byId = new Map(prev.filter(isHoldOrder).map((o) => [o.id, o]));
   const pendingHolds = prev.filter((o) => isHoldOrder(o) && o.id.startsWith("pending:"));
   const remembered = new Set(state.holdIds);
-  const out = next.map((o) => {
+  const out = next.map((raw) => {
+    const carried = carryJournal(state, prev, raw);
+    const prevProbe = prev.find(
+      (p) => p.impulseProbe && p.side === carried.side && (p.id === carried.id || sameRung(p.price, carried.price, state.factor)),
+    );
+    const o = prevProbe ? { ...carried, impulseProbe: true } : carried;
     if (byId.has(o.id) || remembered.has(o.id)) return { ...o, holdUntilFill: true, mine: true };
     if (pendingHolds.some((p) => p.side === o.side && sameRung(p.price, o.price, state.factor))) {
       return { ...o, holdUntilFill: true, mine: true };
@@ -639,6 +659,8 @@ type PlaceOpts = {
   holdUntilFill?: boolean;
   /** Cap-full dump clip: reduce-only even when the sell is below entry. */
   allowUnderwater?: boolean;
+  /** Up-impulse probe. Not an old bunch for the cool to absorb. */
+  impulseProbe?: boolean;
 };
 
 function gateCandidate(state: EngineState, side: Side, target: number, opts: PlaceOpts = {}): GateFail | null {
@@ -779,6 +801,132 @@ function isTpSide(state: EngineState, side: Side): boolean {
   return state.config.market.prefer === "long" ? side === "sell" : side === "buy";
 }
 
+function impulseMovePct(state: EngineState): number {
+  const origin = state.campaignOrigin ?? state.impulseOrigin;
+  const extreme = state.impulseExtreme ?? state.campaignExtreme ?? (state.impulse !== "none" ? state.mark : 0);
+  if (origin && origin > 0 && extreme && extreme > 0) {
+    return Math.abs((extreme - origin) / origin) * 100;
+  }
+  return Math.abs(state.impulseDeltaPct) || 0;
+}
+
+const ORDER_LOG_LIMIT = 400;
+
+function pushOrderEvent(state: EngineState, rec: OrderRecord, event: OrderEvent["event"]) {
+  state.orderEvents = [...state.orderEvents, { ...rec, event }];
+}
+
+function rememberOrder(state: EngineState, order: GridOrder, why: string, reduceOnly: boolean) {
+  const price = order.price;
+  const existing = [...state.orderLog]
+    .reverse()
+    .find((r) => r.status === "open" && r.side === order.side && sameRung(r.price, price, state.factor));
+  if (existing) {
+    order.journalId = existing.id;
+    existing.exchangeId = order.id;
+    existing.qty = order.qty;
+    existing.notional = order.notional;
+    existing.why = why;
+    pushOrderEvent(state, existing, "update");
+    return;
+  }
+  const pctLive = Number(impulseMovePct(state).toFixed(3));
+  const useLeg = state.orderLeg && state.lastLegSide !== "none";
+  const pct = useLeg ? state.lastLegPct : state.impulse !== "none" ? pctLive : 0;
+  const impulse = useLeg ? state.lastLegSide : state.impulse !== "none" ? state.impulse : "none";
+  const rec: OrderRecord = {
+    id: `j-${state.journalSeq++}`,
+    exchangeId: order.id,
+    symbol: state.config.market.symbol,
+    side: order.side,
+    price,
+    qty: order.qty,
+    notional: order.notional,
+    reduceOnly,
+    why,
+    impulse,
+    impulsePct: pct,
+    impulsePctAtPlace: pct,
+    placedAt: state.now,
+    mark: state.mark,
+    status: "open",
+    closedAt: null,
+    closePx: null,
+    pnl: null,
+  };
+  order.journalId = rec.id;
+  const open = state.orderLog.filter((r) => r.status === "open");
+  const closed = state.orderLog.filter((r) => r.status !== "open");
+  state.orderLog = [...closed.slice(-(ORDER_LOG_LIMIT - open.length - 1)), ...open, rec];
+  pushOrderEvent(state, rec, "place");
+}
+
+function orderRecordOf(state: EngineState, order: GridOrder): OrderRecord | undefined {
+  if (order.journalId) {
+    const hit = state.orderLog.find((r) => r.id === order.journalId && r.status === "open");
+    if (hit) return hit;
+  }
+  return [...state.orderLog]
+    .reverse()
+    .find((r) => r.status === "open" && r.side === order.side && sameRung(r.price, order.price, state.factor));
+}
+
+function reducePnl(state: EngineState, side: Side, price: number, qty: number): number | null {
+  const pos = state.position;
+  if (Math.abs(pos.size) < 1e-9 || !(pos.entry > 0)) return null;
+  const reducing = (pos.size < 0 && side === "buy") || (pos.size > 0 && side === "sell");
+  if (!reducing) return null;
+  const closeQty = Math.min(Math.abs(pos.size), qty);
+  const pnl = pos.size < 0 ? (pos.entry - price) * closeQty : (price - pos.entry) * closeQty;
+  return Number(pnl.toFixed(2));
+}
+
+function closeOrderRecord(
+  state: EngineState,
+  order: GridOrder,
+  status: "filled" | "canceled",
+  pnl?: number | null,
+) {
+  const rec = orderRecordOf(state, order);
+  if (!rec) return;
+  rec.status = status;
+  rec.closedAt = state.now;
+  rec.closePx = order.price;
+  rec.exchangeId = order.id;
+  if (rec.impulse !== "none" || state.orderLeg) {
+    const pct = state.orderLeg ? state.lastLegPct : impulseMovePct(state);
+    rec.impulsePct = Number(Math.max(rec.impulsePct, pct).toFixed(3));
+  }
+  if (status === "filled") rec.pnl = pnl ?? null;
+  pushOrderEvent(state, rec, status);
+}
+
+function noteImpulsePct(state: EngineState, force: boolean) {
+  const pct = Number(impulseMovePct(state).toFixed(3));
+  if (!(pct > 0)) return;
+  for (const rec of state.orderLog) {
+    if (rec.status !== "open" || rec.impulse === "none") continue;
+    if (pct + 1e-9 < rec.impulsePct) continue;
+    if (!force && pct < rec.impulsePct + 0.05) continue;
+    rec.impulsePct = pct;
+    pushOrderEvent(state, rec, "update");
+  }
+}
+
+function carryJournal(state: EngineState, prev: GridOrder[], order: GridOrder): GridOrder {
+  if (order.journalId) return order;
+  const hit = prev.find(
+    (p) => p.journalId && p.side === order.side && (p.id === order.id || sameRung(p.price, order.price, state.factor)),
+  );
+  if (!hit?.journalId) return order;
+  const rec = state.orderLog.find((r) => r.id === hit.journalId && r.status === "open");
+  if (rec && rec.exchangeId !== order.id) {
+    rec.exchangeId = order.id;
+    pushOrderEvent(state, rec, "update");
+  }
+  return { ...order, journalId: hit.journalId };
+}
+
 function placeLimit(state: EngineState, side: Side, target: number, why: string, opts: PlaceOpts = {}): boolean {
   const m = state.config.market;
   const price = roundPrice(target, m.priceDecimals);
@@ -835,12 +983,14 @@ function placeLimit(state: EngineState, side: Side, target: number, why: string,
     placedAt: state.now,
     mine: true,
     holdUntilFill: opts.holdUntilFill || undefined,
+    impulseProbe: opts.impulseProbe || undefined,
   };
   state.orders = [...state.orders, order];
   if (opts.holdUntilFill) {
     state.holdIds = [...new Set([...state.holdIds, order.id])];
     rememberOpenHold(state, order, reduceOnly);
   }
+  rememberOrder(state, order, why, reduceOnly);
   emit(state, { type: "place", side, price, qty, why, reduceOnly: reduceOnly || undefined });
   const expect = expectedFillPnl(state, side, price, qty);
   const px = price.toFixed(m.priceDecimals);
@@ -900,6 +1050,7 @@ function parkHold(state: EngineState, order: GridOrder, why: string) {
   state.orders = state.orders.filter((o) => o.id !== order.id);
   state.holdIds = state.holdIds.filter((id) => id !== order.id);
   emitCancel(state, order, why);
+  closeOrderRecord(state, order, "canceled");
   const px = order.price.toFixed(state.config.market.priceDecimals);
   pushLog(state, "clean", `park ${order.side.toUpperCase()} ${px} — ${why}; reopen after cool`);
 }
@@ -947,7 +1098,7 @@ function absorbCloseHold(
     return false;
   });
   for (const order of [...state.orders]) {
-    if (!isHoldOrder(order) || order.side !== side || !inProximity(extreme, order.price, prox)) continue;
+    if (!isHoldOrder(order) || order.impulseProbe || order.side !== side || !inProximity(extreme, order.price, prox)) continue;
     hits.push({ price: order.price, qty: order.qty });
     emitCancel(state, order, "reached inside spacing of old bunch");
     state.orders = state.orders.filter((o) => o.id !== order.id);
@@ -1102,6 +1253,7 @@ function dropOrder(state: EngineState, order: GridOrder, why: string) {
     "clean",
     `clean ${order.side.toUpperCase()} ${order.price.toFixed(m.priceDecimals)} — ${why}`,
   );
+  closeOrderRecord(state, order, "canceled");
 }
 
 function accumulateTargets(state: EngineState): { side: Side; price: number }[] {
@@ -1329,6 +1481,9 @@ function updateImpulse(state: EngineState, input: StepInput) {
   }
   if (resolved.impulse !== state.impulse) {
     if (resolved.impulse === "none") {
+      state.lastLegPct = Number(Math.max(state.lastLegPct, impulseMovePct(state)).toFixed(3));
+      if (state.impulse === "buy" || state.impulse === "sell") state.lastLegSide = state.impulse;
+      noteImpulsePct(state, true);
       const finished = state.impulse === "sell" ? "DOWN" : state.impulse === "buy" ? "UP" : "FLAT";
       const trig = state.config.market.impulseTriggerPct;
       const opposite = state.impulse === "sell" ? "buy" : state.impulse === "buy" ? "sell" : null;
@@ -1376,6 +1531,8 @@ function updateImpulse(state: EngineState, input: StepInput) {
   }
   state.impulse = resolved.impulse;
   state.impulseDeltaPct = resolved.deltaPct;
+  if (resolved.impulse !== "buy") state.upProbe = false;
+  if (resolved.impulse === "buy" || resolved.impulse === "sell") noteImpulsePct(state, false);
   chaseParked(state);
 }
 
@@ -1592,6 +1749,64 @@ function placeRecuperate(state: EngineState, qty: number, soldAt: number) {
     "place",
     `one lvl BUY ${px.toFixed(m.priceDecimals)} × ${clip.toFixed(m.sizeDecimals)} — cool ${cool.toFixed(m.priceDecimals)} was not below the sell ${soldAt.toFixed(m.priceDecimals)}, no bunch under the start`,
     { side: "buy", price: px, qty: clip, hold: true },
+  );
+}
+
+function maybePlaceImpulseUpBuy(state: EngineState) {
+  if (!state.config.armed || state.impulse !== "buy" || !isAccumulate(state)) return;
+  if (state.upProbe || state.accountSource === "none") return;
+  if (state.position.size < -1e-9) {
+    state.upProbe = true;
+    return;
+  }
+  const pct = impulseMovePct(state);
+  if (!underBuyCap(state)) {
+    state.upProbe = true;
+    pushLog(state, "impulse", `impulse-up buy skipped — buy cap (Δ ${pct.toFixed(3)}%)`);
+    return;
+  }
+  const m = state.config.market;
+  const price = roundPrice(state.mark, m.priceDecimals);
+  let qty = baseQty(price, state.config.orderNotional, m.sizeDecimals);
+  qty = liftQtyToMins(state, qty, price);
+  const placed = placeLimit(state, "buy", price, "impulse-up 1× ticket", {
+    qty,
+    allowExtra: true,
+    allowImpulse: true,
+    holdUntilFill: true,
+    impulseProbe: true,
+  });
+  state.upProbe = true;
+  if (!placed) return;
+  const buy = [...state.orders].reverse().find((o) => o.side === "buy" && sameRung(o.price, price, state.factor));
+  const buyQty = buy?.qty ?? qty;
+  pushLog(
+    state,
+    "impulse",
+    `impulse-up BUY ${price.toFixed(m.priceDecimals)} × ${buyQty.toFixed(m.sizeDecimals)} — one ticket on the rip (Δ ${pct.toFixed(3)}%)`,
+  );
+  if (!(state.position.size > 1e-12)) return;
+  const sellPx = upLevel(price, tpFactorOf(m, state.factor), m.priceDecimals);
+  let sellQty = baseQty(sellPx, state.config.orderNotional, m.sizeDecimals);
+  sellQty = liftQtyToMins(state, sellQty, sellPx);
+  sellQty = roundQty(Math.min(sellQty, state.position.size), m.sizeDecimals);
+  if (!(sellQty > 0)) return;
+  if (
+    !placeLimit(state, "sell", sellPx, "impulse-up reduce-only above buy", {
+      qty: sellQty,
+      reduceOnly: true,
+      allowExtra: true,
+      allowImpulse: true,
+      holdUntilFill: true,
+      impulseProbe: true,
+    })
+  ) {
+    return;
+  }
+  pushLog(
+    state,
+    "impulse",
+    `impulse-up SELL ${sellPx.toFixed(m.priceDecimals)} reduce-only above the buy ${price.toFixed(m.priceDecimals)} (Δ ${pct.toFixed(3)}%)`,
   );
 }
 
@@ -1843,9 +2058,11 @@ function runArmedCycle(state: EngineState) {
   let waitFill = false;
   const catching = state.impulseJustCooled;
   if (catching) {
+    state.orderLeg = true;
     impulseCoolCatch(state);
+    state.orderLeg = false;
   } else if (state.impulse !== "none") {
-    // up impulse does not sell; the cool places the reduce. down impulse only clips at the cap.
+    // up impulse: one buy + reduce-only above it. down impulse: cap-relief sell only.
   } else if (isAccumulate(state) && anchor) {
     cleanInvalid(state);
   } else if (anchor && currentBias === "short" && adverseAgainstShort(anchor, state.mark, state.factor, steps)) {
@@ -1859,6 +2076,7 @@ function runArmedCycle(state: EngineState) {
   }
 
   if (state.impulse === "sell") maybePlaceCapRelief(state);
+  if (state.impulse === "buy") maybePlaceImpulseUpBuy(state);
 
   if (!catching) {
     if (state.accountSource !== "live") {
@@ -1882,6 +2100,7 @@ function runArmedCycle(state: EngineState) {
 export function step(state: EngineState, input: StepInput): EngineState {
   state.fillsThisCycle = [];
   state.actions = [];
+  state.orderEvents = [];
   state.now = input.now;
   if (input.mark > 0) {
     state.prevMark = state.mark > 0 ? state.mark : null;
@@ -1964,6 +2183,7 @@ export function snapshotPublic(state: EngineState) {
     bias: bias(state),
     flat: isFlat(state),
     fillsThisCycle: state.fillsThisCycle,
+    orderLog: state.orderLog.slice(-40),
     markHistory: state.markHistory,
     hourlyCandles: state.hourlyCandles,
     now: state.now,

@@ -1244,7 +1244,7 @@ describe("SPCX accumulate", () => {
     assert.equal(s.highestLvl, hi);
   });
 
-  it("up impulse does not sell; the reduce waits for the cool", () => {
+  it("up impulse buys one ticket and rests a reduce-only above it", () => {
     const s = createInitialState({ market: SPCX, startingEquity: 5000 });
     const last = 140;
     s.lastFillPrice = last;
@@ -1264,8 +1264,35 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
-    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "sell"), "no reduce while price is still running up");
-    assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"));
+    const buy = s.actions.find((a) => a.type === "place" && a.side === "buy" && a.why.includes("impulse-up"));
+    const sell = s.actions.find((a) => a.type === "place" && a.side === "sell" && a.why.includes("reduce-only above"));
+    assert.ok(buy && buy.type === "place");
+    assert.ok(Math.abs(buy.price - 142.6) < 0.02, "one buy at the rip, not a ladder");
+    assert.ok(sell && sell.type === "place" && sell.reduceOnly && sell.price > buy.price, "reduce-only sits above that buy");
+    const row = s.orderLog.find((r) => r.id && r.side === "buy" && r.why.includes("impulse-up"));
+    assert.ok(row);
+    assert.equal(row.impulse, "buy");
+    assert.ok(row.impulsePct >= 1.7, "column is the impulse size, not zero");
+    assert.equal(row.status, "open");
+    const again = s.actions.length;
+    step(s, {
+      now: t0 + 51_000,
+      mark: 143,
+      live: liveAccount({
+        equity: 2000,
+        position: { size: 4, entry: 138 },
+        positionNotional: 572,
+        orders: s.orders.filter((o) => o.side === "buy" || o.side === "sell"),
+      }),
+    });
+    assert.equal(s.impulse, "buy");
+    assert.equal(
+      s.actions.filter((a) => a.type === "place" && a.why.includes("impulse-up")).length,
+      0,
+      "one buy per up impulse",
+    );
+    assert.ok(s.orderLog.filter((r) => r.why.includes("impulse-up") && r.side === "buy").length === 1);
+    assert.ok(again > 0);
     step(s, {
       now: t0 + 52_000,
       mark: 141.6,
@@ -1278,8 +1305,37 @@ describe("SPCX accumulate", () => {
     });
     assert.equal(s.impulse, "none");
     const sells = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
-    assert.equal(sells.length, 1, "the cool places the one reduce");
-    assert.ok(sells[0]!.price > 138, "that reduce is above entry");
+    assert.ok(sells.length >= 1, "the cool still places the reduce");
+    assert.ok(sells.some((o) => o.price > 138));
+  });
+
+  it("marks the impulse order filled or canceled and keeps the impulse percent", () => {
+    const s = createInitialState({ market: SPCX, startingEquity: 8000 });
+    s.lastFillPrice = 140;
+    s.lastFillAt = 1;
+    s.highestLvl = 140;
+    s.position = { size: 4, entry: 138 };
+    setArmed(s, true);
+    const live = (size: number, mark: number, orders: GridOrder[]) =>
+      liveAccount({
+        equity: 8000,
+        position: { size, entry: 138 },
+        positionNotional: size * mark,
+        orders,
+      });
+    step(s, { now: 10_000, mark: 142.6, live: live(4, 142.6, []) });
+    const buy = s.orders.find((o) => o.side === "buy" && o.holdUntilFill);
+    const sell = s.orders.find((o) => o.side === "sell" && o.holdUntilFill);
+    assert.ok(buy && sell);
+    step(s, { now: 12_000, mark: 142.5, live: live(4 + buy.qty, 142.5, [sell]) });
+    const buyRow = s.orderLog.find((r) => r.id === buy.journalId);
+    assert.equal(buyRow?.status, "filled");
+    assert.ok((buyRow?.impulsePct ?? 0) >= 1.7);
+    assert.equal(buyRow?.impulsePctAtPlace, buyRow?.impulsePct);
+    setArmed(s, false);
+    const sellRow = s.orderLog.find((r) => r.id === sell.journalId);
+    assert.equal(sellRow?.status, "canceled");
+    assert.equal(sellRow?.impulse, "buy");
   });
 
   it("UP cool on a hard reversal sells that leg once, then starts DOWN with no second bunch", () => {
@@ -1301,7 +1357,11 @@ describe("SPCX accumulate", () => {
       }),
     });
     assert.equal(s.impulse, "buy");
-    assert.ok(!s.orders.some((o) => o.side === "sell"), "no sell while the up impulse is running");
+    const probe = s.orders.find((o) => o.side === "buy");
+    const above = s.orders.find((o) => o.side === "sell");
+    assert.ok(probe && Math.abs(probe.price - 142.6) < 0.05, "one buy on the up impulse");
+    assert.ok(above && above.price > probe.price, "reduce-only is above that buy");
+    const resting = s.orders.filter((o) => o.holdUntilFill);
     step(s, {
       now: t0 + 100_000,
       mark: 136,
@@ -1309,12 +1369,12 @@ describe("SPCX accumulate", () => {
         equity: 2000,
         position: { size: 4, entry: 130 },
         positionNotional: 544,
-        orders: [],
+        orders: resting,
       }),
     });
     assert.equal(s.impulse, "sell");
     assert.ok(!s.actions.some((a) => a.type === "place" && a.side === "buy"), "no buy bunch on the reversal — the UP leg sells");
-    const sellBunch = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
+    const sellBunch = s.orders.filter((o) => o.holdUntilFill && o.side === "sell" && o.price < 140);
     assert.equal(sellBunch.length, 1, "one cool bunch, not a flip bunch plus a cool bunch");
     assert.ok(s.logs.some((l) => l.message.includes("UP impulse cool")));
     assert.ok(s.logs.some((l) => l.message.includes("DOWN impulse start after cool")));
@@ -1660,10 +1720,11 @@ describe("SPCX accumulate", () => {
     });
     assert.equal(s.impulse, "none");
     assert.ok(!s.orders.some((o) => o.id === "leftover-sell"), "price went past the old sell — it is replaced, not kept");
-    const replaced = s.orders.filter((o) => o.holdUntilFill && o.side === "sell");
+    const replaced = s.orders.filter((o) => o.holdUntilFill && o.side === "sell" && !o.impulseProbe);
     assert.equal(replaced.length, 1, "one accumulated sell");
     assert.ok(Math.abs(replaced[0]!.price - 144.5) < 0.05, "inside spacing — one sell stays on the old price");
     assert.ok(replaced[0]!.qty > 0.05, "size is the reached move");
+    assert.ok(s.orders.some((o) => o.impulseProbe && o.side === "sell" && o.price > 145), "up-impulse reduce-only stays until it fills");
     const buy = downLevel(s.lastFillPrice ?? mid, SPCX.defaultFactor, SPCX.priceDecimals);
     assert.ok(
       s.orders.some((o) => o.side === "buy" && Math.abs(o.price - buy) < 0.05) ||

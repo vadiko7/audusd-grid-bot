@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import http from "node:http";
@@ -13,7 +13,7 @@ import {
   snapshotPublic,
   step,
 } from "../src/lib/grid/engine.ts";
-import type { EngineAction, EngineState, GridOrder, LiveAccount } from "../src/lib/grid/types.ts";
+import type { EngineAction, EngineState, GridOrder, LiveAccount, OrderEvent } from "../src/lib/grid/types.ts";
 import { sameRung, baseQty } from "../src/lib/grid/math.ts";
 import { fetchAccount, fetchActiveOrders, fetchMark, restBlockedFor, restReady, sendTx } from "./rest.ts";
 import { createAuthToken, dropSigner, refreshNonce, signCreateLimit, type LighterCreds } from "./signer.ts";
@@ -58,6 +58,8 @@ const envFile = loadDotEnv();
 const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
 const SETTINGS_PATH = path.join(ROOT, "data/settings.json");
 const OWNED_PATH = path.join(ROOT, "data/owned.json");
+const ORDER_CSV_PATH = path.join(ROOT, "data/orders.csv");
+const ORDER_JSONL_PATH = path.join(ROOT, "data/orders.jsonl");
 
 const OWNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -86,6 +88,7 @@ type SavedSettings = {
       reliefQty?: number;
       reliefBaseline?: number;
       reliefPrice?: number;
+      upProbe?: boolean;
     }
   >;
   orderNotional?: number;
@@ -274,6 +277,7 @@ function saveSettings(book: {
     campaignBunched: boolean;
     openHolds: Array<{ side: string; price: number; qty: number; reduceOnly?: boolean; parked?: boolean }>;
     relief: { qty: number; baselinePos: number; price: number } | null;
+    upProbe: boolean;
   };
 }) {
   mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
@@ -312,6 +316,7 @@ function saveSettings(book: {
     reliefQty: book.engine.relief?.qty,
     reliefBaseline: book.engine.relief?.baselinePos,
     reliefPrice: book.engine.relief?.price,
+    upProbe: book.engine.upProbe || undefined,
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify({ ...prev, markets }, null, 2)}\n`);
 }
@@ -419,6 +424,7 @@ function makeBook(market: MarketProfile): Book {
   if (reliefQty > 0 && reliefPrice > 0 && Number.isFinite(reliefBaseline)) {
     engine.relief = { qty: reliefQty, baselinePos: reliefBaseline, price: reliefPrice };
   }
+  if (savedM?.upProbe) engine.upProbe = true;
   const persisted = loadOwned()[market.symbol] ?? emptyOwned();
   return { market, engine, mark: 0, live: null, owned: persisted, lastManualSkip: -1, workingAll: [], manuals: [], giveUp: new Set() };
 }
@@ -616,6 +622,7 @@ async function tick() {
         if (book.engine.lastFillPrice || book.engine.highestLvl || book.engine.holdIds.length || book.engine.soldRungs.length || book.engine.campaignOrigin || book.engine.openHolds.length) saveSettings(book);
       }
     }
+    flushOrderLog();
     drainAndSend();
     if (now - lastBeat > 20_000) {
       lastBeat = now;
@@ -638,6 +645,116 @@ async function tick() {
   }
   const wait = Math.min(...books.map((b) => b.engine.cycleMs));
   timer = setTimeout(tick, Math.max(wait, 250));
+}
+
+function csvCell(value: string | number | boolean | null): string {
+  const s = value == null ? "" : String(value);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+const ORDER_HEADER = [
+  "id",
+  "symbol",
+  "placed_at",
+  "side",
+  "price",
+  "qty",
+  "notional",
+  "reduce_only",
+  "why",
+  "impulse",
+  "impulse_pct",
+  "impulse_pct_at_place",
+  "mark",
+  "status",
+  "closed_at",
+  "close_px",
+  "pnl",
+  "exchange_id",
+];
+
+function orderCells(ev: OrderEvent): string[] {
+  return [
+    ev.id,
+    ev.symbol,
+    new Date(ev.placedAt).toISOString(),
+    ev.side,
+    String(ev.price),
+    String(ev.qty),
+    ev.notional.toFixed(2),
+    ev.reduceOnly ? "1" : "0",
+    ev.why,
+    ev.impulse,
+    ev.impulsePct.toFixed(3),
+    ev.impulsePctAtPlace.toFixed(3),
+    String(ev.mark),
+    ev.status,
+    ev.closedAt ? new Date(ev.closedAt).toISOString() : "",
+    ev.closePx == null ? "" : String(ev.closePx),
+    ev.pnl == null ? "" : ev.pnl.toFixed(2),
+    ev.exchangeId,
+  ];
+}
+
+const orderRows = new Map<string, string[]>();
+
+function loadOrderCsv() {
+  if (!existsSync(ORDER_CSV_PATH)) return;
+  const lines = readFileSync(ORDER_CSV_PATH, "utf8").split(/\r?\n/).filter((l) => l.trim());
+  for (const line of lines.slice(1)) {
+    const cells = splitCsv(line);
+    if (cells.length >= 1 && cells[0]) orderRows.set(cells[0], cells);
+  }
+}
+
+function splitCsv(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (q) {
+      if (c === '"' && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else if (c === '"') q = false;
+      else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function flushOrderLog() {
+  const fresh: OrderEvent[] = [];
+  for (const book of books) {
+    if (!book.engine.orderEvents.length) continue;
+    fresh.push(...book.engine.orderEvents);
+    book.engine.orderEvents = [];
+  }
+  if (!fresh.length) return;
+  mkdirSync(path.dirname(ORDER_CSV_PATH), { recursive: true });
+  for (const ev of fresh) {
+    orderRows.set(ev.id, orderCells(ev));
+    if (ev.event === "place" || ev.event === "filled" || ev.event === "canceled") {
+      log(
+        `${ev.symbol} order ${ev.event} ${ev.side} ${ev.price} × ${ev.qty} impulse ${ev.impulse} ${ev.impulsePct.toFixed(3)}% ${ev.status} ${ev.why}`,
+      );
+    }
+  }
+  appendFileSync(
+    ORDER_JSONL_PATH,
+    fresh.map((ev) => JSON.stringify({ event: ev.event, ...ev, placedAt: new Date(ev.placedAt).toISOString() })).join("\n") + "\n",
+  );
+  const body = [ORDER_HEADER.join(","), ...[...orderRows.values()].map((cells) => cells.map(csvCell).join(","))].join("\n") + "\n";
+  const tmp = `${ORDER_CSV_PATH}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, ORDER_CSV_PATH);
 }
 
 function status() {
@@ -663,8 +780,12 @@ button{background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.35rem 
 .grid{display:grid;gap:1.2rem;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 .card{background:#101216;border:1px solid #2e323a;padding:1rem 1.1rem}
 input{width:6rem;margin:0 .4rem;background:#1b1d22;color:#ecece8;border:1px solid #2e323a;padding:.3rem}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td,th{text-align:left;padding:2px 4px;border-bottom:1px solid #2e323a;white-space:nowrap}
+a{color:#9db7d5}
 </style></head><body>
 <h1>grid desk <span id="acct" class="muted"></span></h1>
+<p class="muted"><a href="/orders.csv">orders.csv</a> — every order, impulse % at send and the max the leg reached</p>
 <p id="err" class="bad"></p>
 <p id="tx" class="muted"></p>
 <div class="grid" id="books"></div>
@@ -694,7 +815,17 @@ function card(s){
     +'<p><button data-cmd="/arm">Arm</button><button data-cmd="/disarm">Disarm</button><button data-cmd="/flatten">Flatten</button></p>'
     +'<p><label>$/lvl <input class="notional" type="number" min="10" max="10000" step="1" value="'+Number(s.orderNotional)+'"></label>'
     +'<button class="setNotional">Set</button></p>'
-    +"<h3>Working</h3><ul>"+orders+"</ul><h3>Blotter</h3><ul>"+logs+"</ul></div>";
+    +"<h3>Working</h3><ul>"+orders+"</ul>"
+    +"<h3>Order log</h3><table>"
+    +"<tr><th>time</th><th></th><th>px</th><th>impulse %</th><th></th><th>why</th></tr>"
+    +([... (s.orderLog||[])].reverse().slice(0,12).map(r=>{
+        const st = r.status==="filled"?"ok":r.status==="canceled"?"warn":"";
+        return "<tr><td><code>"+new Date(r.placedAt).toISOString().slice(11,19)+"</code></td>"
+          +"<td>"+esc(r.side)+"</td><td>"+Number(r.price).toFixed(d)+"</td>"
+          +"<td>"+(Number(r.impulsePct)||0).toFixed(2)+(r.impulse&&r.impulse!=="none"?" "+esc(r.impulse):"")+"</td>"
+          +"<td class='"+st+"'>"+esc(r.status)+"</td><td class='muted'>"+esc(r.why)+"</td></tr>";
+      }).join("")||"<tr><td colspan='6' class='muted'>no orders yet</td></tr>")
+    +"</table><h3>Blotter</h3><ul>"+logs+"</ul></div>";
 }
 async function refresh(){
   const s = await fetch("/status",{cache:"no-store"}).then(r=>r.json());
@@ -764,6 +895,17 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, symbol: b.market.symbol, orderNotional: b.engine.config.orderNotional }));
     return;
   }
+  if (url.pathname === "/orders.csv" && (req.method === "GET" || req.method === "HEAD")) {
+    flushOrderLog();
+    if (!existsSync(ORDER_CSV_PATH)) {
+      res.writeHead(200, { "content-type": "text/csv; charset=utf-8" });
+      res.end(ORDER_HEADER.join(",") + "\n");
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "cache-control": "no-store" });
+    res.end(readFileSync(ORDER_CSV_PATH));
+    return;
+  }
   if (url.pathname === "/status") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify(status()));
@@ -783,6 +925,7 @@ async function main() {
   log(
     `bot start acct ${creds.accountIndex} key ${creds.apiKeyIndex} markets=${books.map((b) => b.market.symbol).join(",")} arm_on_start=${WANT_ARM} env=${envFile ?? "process-env"}`,
   );
+  loadOrderCsv();
   for (const b of books) {
     if (b.engine.lastFillPrice) {
       log(`${b.market.symbol} lastFill restored ${b.engine.lastFillPrice}  $/lvl ${b.engine.config.orderNotional}`);
@@ -829,6 +972,7 @@ async function main() {
         }
       }
       lastAccount = Date.now();
+      flushOrderLog();
       drainAndSend();
       timer = setTimeout(tick, 80);
       return;
